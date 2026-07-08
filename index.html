@@ -549,12 +549,12 @@ function render(){
 }
 
 let summaryScope="current"; // "current" or "all"
+let summaryCollapsed = (localStorage.getItem("cf_sumCollapsed")==="1");
 function monthKey(d){ return d.getFullYear()+"-"+String(d.getMonth()).padStart(2,"0"); }
 function monthLabel(d){ return d.toLocaleDateString(undefined,{month:"short",year:"numeric"}); }
 function renderMonthSummary(paidCurrent){
   const el=document.getElementById("monthSummary");
   const accounts = summaryScope==="all" ? state.accounts : [cur];
-  // months -> {incPaid,incRem,expPaid,expRem, sampleDate}
   const months={};
   accounts.forEach(acct=>{
     const paid=new Set(state.paid[acct]||[]);
@@ -569,27 +569,33 @@ function renderMonthSummary(paidCurrent){
   });
   const keys=Object.keys(months).sort();
   const scopeLbl = summaryScope==="all" ? "All accounts" : cur;
-  let h='<div class="msum"><div class="mstabs">'+
-    '<button class="mstab '+(summaryScope==="current"?"active":"")+'" data-scope="current">This account</button>'+
-    '<button class="mstab '+(summaryScope==="all"?"active":"")+'" data-scope="all">All combined</button></div>'+
-    '<h3>Monthly totals — '+scopeLbl+'</h3>'+
-    '<div class="mshead"><span>Month</span><span>In</span><span>Out</span><span>Net</span></div>';
-  if(!keys.length){ h+='<p class="mspaid" style="padding:6px 0;">No items in the next 60 days.</p>'; }
-  keys.forEach(k=>{
-    const m=months[k];
-    const inc=m.incP+m.incR, exp=m.expP+m.expR, net=inc-exp;
-    const paidBits=[];
-    if(m.incP||m.expP) paidBits.push("paid so far: +"+fmt0(m.incP)+" / −"+fmt0(m.expP));
-    h+='<div class="msrow">'+
-      '<span class="mo">'+monthLabel(m.d)+'</span>'+
-      '<span class="inc">+'+fmt0(inc)+'</span>'+
-      '<span class="exp">−'+fmt0(exp)+'</span>'+
-      '<span class="net '+(net>=0?"pos":"neg")+'">'+(net>=0?"+":"−")+fmt0(Math.abs(net))+'</span>'+
-      (paidBits.length?'<span class="mspaid" style="grid-column:1/-1;">'+paidBits.join("")+'</span>':'')+
-    '</div>';
-  });
+  const chev = summaryCollapsed ? "▸" : "▾";
+  let h='<div class="msum">'+
+    '<h3 id="sumToggle" style="cursor:pointer; display:flex; align-items:center; gap:6px; margin-bottom:'+(summaryCollapsed?"0":"8px")+';"><span style="font-size:11px;">'+chev+'</span> Monthly totals — '+scopeLbl+'</h3>';
+  if(!summaryCollapsed){
+    h+='<div class="mstabs">'+
+      '<button class="mstab '+(summaryScope==="current"?"active":"")+'" data-scope="current">This account</button>'+
+      '<button class="mstab '+(summaryScope==="all"?"active":"")+'" data-scope="all">All combined</button></div>'+
+      '<div class="mshead"><span>Month</span><span>In</span><span>Out</span><span>Net</span></div>';
+    if(!keys.length){ h+='<p class="mspaid" style="padding:6px 0;">No items in the next 60 days.</p>'; }
+    keys.forEach(k=>{
+      const m=months[k];
+      const inc=m.incP+m.incR, exp=m.expP+m.expR, net=inc-exp;
+      const paidBits=[];
+      if(m.incP||m.expP) paidBits.push("paid so far: +"+fmt0(m.incP)+" / −"+fmt0(m.expP));
+      h+='<div class="msrow">'+
+        '<span class="mo">'+monthLabel(m.d)+'</span>'+
+        '<span class="inc">+'+fmt0(inc)+'</span>'+
+        '<span class="exp">−'+fmt0(exp)+'</span>'+
+        '<span class="net '+(net>=0?"pos":"neg")+'">'+(net>=0?"+":"−")+fmt0(Math.abs(net))+'</span>'+
+        (paidBits.length?'<span class="mspaid" style="grid-column:1/-1;">'+paidBits.join("")+'</span>':'')+
+      '</div>';
+    });
+  }
   h+='</div>';
   el.innerHTML=h;
+  const tog=document.getElementById("sumToggle");
+  if(tog) tog.onclick=()=>{ summaryCollapsed=!summaryCollapsed; localStorage.setItem("cf_sumCollapsed", summaryCollapsed?"1":"0"); render(); };
   el.querySelectorAll(".mstab").forEach(b=>b.onclick=()=>{ summaryScope=b.dataset.scope; render(); });
 }
 
@@ -669,7 +675,9 @@ document.getElementById("renameAcctBtn").onclick=()=>{
 };
 document.getElementById("delAcctBtn").onclick=()=>{
   if(state.accounts.length<=1){ document.getElementById("status").textContent="Can't delete your only account. Use Reset all instead."; return; }
-  if(!confirm('Delete the "'+cur+'" account and all its items, balance, and settings? This cannot be undone.')) return;
+  const ans=prompt('Delete the "'+cur+'" account and everything in it (items, balance, settings)? This cannot be undone.\n\nType the word  DELETE  to confirm:');
+  if(ans===null) return;
+  if(ans.trim().toUpperCase()!=="DELETE"){ document.getElementById("status").textContent="Delete cancelled — you didn't type DELETE."; return; }
   const gone=cur;
   state.accounts=state.accounts.filter(a=>a!==gone);
   state.items=state.items.filter(it=>it.account!==gone);
@@ -679,9 +687,10 @@ document.getElementById("delAcctBtn").onclick=()=>{
   document.getElementById("status").textContent='Deleted "'+gone+'".';
 };
 document.getElementById("resetBtn").onclick=()=>{
-  if(confirm("Erase everything and start over? This clears all accounts, items, and balances on this device.")){
-    localStorage.removeItem(KEY); state=null; pending=[]; detected=[]; renderFileList(); show("importScreen");
-  }
+  const ans=prompt("This erases EVERYTHING on this device — all accounts, items, balances, and settings. It cannot be undone.\n\nType the word  RESET  to confirm:");
+  if(ans===null) return;
+  if(ans.trim().toUpperCase()!=="RESET"){ document.getElementById("status").textContent="Reset cancelled — you didn't type RESET."; return; }
+  localStorage.removeItem(KEY); state=null; pending=[]; detected=[]; renderFileList(); show("importScreen");
 };
 
 /* ---------------- BOOT ---------------- */
