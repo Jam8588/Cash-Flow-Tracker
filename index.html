@@ -76,6 +76,20 @@
   .nm.paid{text-decoration:line-through; color:var(--muted);}
   .editbtn{background:none; border:none; color:var(--muted); cursor:pointer; font-size:13px; padding:0 4px; opacity:.6;}
   .editbtn:hover{opacity:1; color:var(--accent);}
+  .msum{background:var(--surface-1); border-radius:12px; padding:12px 14px; margin-bottom:14px;}
+  .msum h3{font-size:13px; color:var(--text-2); margin:0 0 8px; font-weight:600;}
+  .msrow{display:grid; grid-template-columns:1fr auto auto auto; gap:10px; align-items:baseline; padding:5px 0; border-bottom:1px solid var(--border); font-size:13px;}
+  .msrow:last-child{border-bottom:none;}
+  .msrow .mo{color:var(--text);}
+  .msrow .inc{color:var(--green); text-align:right; white-space:nowrap;}
+  .msrow .exp{color:var(--text); text-align:right; white-space:nowrap;}
+  .msrow .net{font-weight:600; text-align:right; white-space:nowrap; min-width:74px;}
+  .msrow .net.pos{color:var(--green);} .msrow .net.neg{color:var(--red);}
+  .mshead{display:grid; grid-template-columns:1fr auto auto auto; gap:10px; font-size:11px; color:var(--muted); padding-bottom:4px;}
+  .mspaid{font-size:11px; color:var(--muted);}
+  .mstabs{display:flex; gap:6px; margin-bottom:10px;}
+  .mstab{font-size:12px; padding:5px 11px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--text-2); cursor:pointer;}
+  .mstab.active{border-color:var(--accent); color:var(--text); font-weight:600;}
   .dt{font-size:11px; color:var(--muted);}
   .amt{font-size:14px; text-align:right; white-space:nowrap;}
   .amt.in{color:var(--green);} .amt.out{color:var(--text);} .amt.muted{color:var(--muted);}
@@ -166,6 +180,8 @@
         <button class="btn danger hide" id="delItem">Delete</button>
       </div>
     </div>
+    <div id="monthSummary"></div>
+    <input id="searchBox" type="text" placeholder="Search transactions…" style="width:100%; font-size:14px; padding:9px 12px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--text); margin-bottom:12px;" />
     <div id="rows"></div>
     <p class="status" id="status"></p>
     <p class="note">Red = below $0. Amber = below your buffer. Tap a checkbox as each payment happens to mark it paid and update your balance.</p>
@@ -473,11 +489,15 @@ function render(){
   const buffer=state.buffer[cur]||0; const paid=new Set(state.paid[cur]||[]);
   const items=state.items.filter(it=>it.account===cur);
   const sched=buildSchedule(items);
+  const query=(document.getElementById("searchBox").value||"").trim().toLowerCase();
   let bal=state.bal[cur], low=bal, lowDate=null, firstAfter=null, firstName="";
   let html=""; let lastMonth="";
   sched.forEach(o=>{
     const isPaid=paid.has(o.key);
+    // running balance / lowest-point always use the FULL schedule (not filtered)
     if(!isPaid){ bal+=(o.t==="in"?o.a:-o.a); if(firstAfter===null){firstAfter=bal;firstName=o.n;} if(bal<low){low=bal;lowDate=o.date;} }
+    // but only DISPLAY rows matching the search
+    if(query && !o.n.toLowerCase().includes(query)) return;
     const mo=o.date.toLocaleDateString(undefined,{month:"long",year:"numeric"});
     if(mo!==lastMonth){ html+='<div class="monthhdr">'+mo+'</div>'; lastMonth=mo; }
     const dstr=o.date.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"});
@@ -490,7 +510,8 @@ function render(){
       '<div class="amt '+(isPaid?'muted':(isIn?'in':'out'))+'">'+(isIn?"+":"−")+fmt(o.a)+'</div>'+
       '<div class="bal '+balCls+'">'+balTxt+'</div></div>';
   });
-  document.getElementById("rows").innerHTML = html || '<p style="color:var(--muted); font-size:14px; padding:12px 0;">No upcoming items for this account.</p>';
+  document.getElementById("rows").innerHTML = html || '<p style="color:var(--muted); font-size:14px; padding:12px 0;">'+(query?'No transactions match "'+query+'".':'No upcoming items for this account.')+'</p>';
+  renderMonthSummary(paid);
   const af=document.getElementById("afterNext"); af.textContent=firstAfter===null?"—":fmt0(firstAfter);
   af.style.color=firstAfter===null?"var(--text)":(firstAfter<0?"var(--red)":(firstAfter<buffer?"var(--amber)":"var(--text)"));
   document.getElementById("afterNextLbl").textContent=firstName?("after "+firstName):"all upcoming paid";
@@ -508,6 +529,51 @@ function render(){
   });
   document.querySelectorAll(".editbtn").forEach(b=>{ b.onclick=()=>openEdit(b.dataset.edit); });
   save();
+}
+
+let summaryScope="current"; // "current" or "all"
+function monthKey(d){ return d.getFullYear()+"-"+String(d.getMonth()).padStart(2,"0"); }
+function monthLabel(d){ return d.toLocaleDateString(undefined,{month:"short",year:"numeric"}); }
+function renderMonthSummary(paidCurrent){
+  const el=document.getElementById("monthSummary");
+  const accounts = summaryScope==="all" ? state.accounts : [cur];
+  // months -> {incPaid,incRem,expPaid,expRem, sampleDate}
+  const months={};
+  accounts.forEach(acct=>{
+    const paid=new Set(state.paid[acct]||[]);
+    const items=state.items.filter(it=>it.account===acct);
+    buildSchedule(items).forEach(o=>{
+      const k=monthKey(o.date);
+      const m=months[k]||(months[k]={incP:0,incR:0,expP:0,expR:0,d:o.date});
+      const isPaid=paid.has(o.key);
+      if(o.t==="in"){ if(isPaid) m.incP+=o.a; else m.incR+=o.a; }
+      else { if(isPaid) m.expP+=o.a; else m.expR+=o.a; }
+    });
+  });
+  const keys=Object.keys(months).sort();
+  const scopeLbl = summaryScope==="all" ? "All accounts" : cur;
+  let h='<div class="msum"><div class="mstabs">'+
+    '<button class="mstab '+(summaryScope==="current"?"active":"")+'" data-scope="current">This account</button>'+
+    '<button class="mstab '+(summaryScope==="all"?"active":"")+'" data-scope="all">All combined</button></div>'+
+    '<h3>Monthly totals — '+scopeLbl+'</h3>'+
+    '<div class="mshead"><span>Month</span><span>In</span><span>Out</span><span>Net</span></div>';
+  if(!keys.length){ h+='<p class="mspaid" style="padding:6px 0;">No items in the next 60 days.</p>'; }
+  keys.forEach(k=>{
+    const m=months[k];
+    const inc=m.incP+m.incR, exp=m.expP+m.expR, net=inc-exp;
+    const paidBits=[];
+    if(m.incP||m.expP) paidBits.push("paid so far: +"+fmt0(m.incP)+" / −"+fmt0(m.expP));
+    h+='<div class="msrow">'+
+      '<span class="mo">'+monthLabel(m.d)+'</span>'+
+      '<span class="inc">+'+fmt0(inc)+'</span>'+
+      '<span class="exp">−'+fmt0(exp)+'</span>'+
+      '<span class="net '+(net>=0?"pos":"neg")+'">'+(net>=0?"+":"−")+fmt0(Math.abs(net))+'</span>'+
+      (paidBits.length?'<span class="mspaid" style="grid-column:1/-1;">'+paidBits.join("")+'</span>':'')+
+    '</div>';
+  });
+  h+='</div>';
+  el.innerHTML=h;
+  el.querySelectorAll(".mstab").forEach(b=>b.onclick=()=>{ summaryScope=b.dataset.scope; render(); });
 }
 
 let editingId=null;
@@ -537,6 +603,7 @@ function closeForm(){
   document.getElementById("addForm").classList.remove("open");
 }
 document.getElementById("curBal").addEventListener("input", render);
+document.getElementById("searchBox").addEventListener("input", render);
 document.getElementById("addBtn").onclick=()=>{ if(editingId){ closeForm(); } document.getElementById("addForm").classList.toggle("open"); };
 document.getElementById("cancelItem").onclick=()=>closeForm();
 document.getElementById("nFreq").addEventListener("change",function(){ document.getElementById("nAnchor").classList.toggle("hide",this.value!=="biweekly"); document.getElementById("nDay").classList.toggle("hide",this.value==="biweekly"); });
