@@ -141,7 +141,7 @@
   <button class="draweritem" id="feedbackBtn">Send feedback / request a feature</button>
   <p class="drawerhdr">Start over</p>
   <button class="draweritem danger" id="resetBtn">Reset all</button>
-  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v17</span></p>
+  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v18</span></p>
 </nav>
 
 <!-- Sign-in modal -->
@@ -258,9 +258,10 @@ const CLOUD_ROW_ID="household";
 let sb=null;
 try{ if(window.supabase&&window.supabase.createClient){ sb=window.supabase.createClient(SB_URL, SB_KEY); } }catch(e){ console.log("supabase init failed",e); }
 let currentUser=null, syncing=false, autoSyncTimer=null;
+let lastSyncedUpdated=0; // the state.updated value at our last successful push/pull (this device's "clean" marker)
 
 const KEY = "cashflow_multi_v1";
-const APP_VERSION = "v17";
+const APP_VERSION = "v18";
 const DAY = 864e5;
 const fmt = (v)=>(v<0?"-":"")+"$"+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmt0 = (v)=>(v<0?"-":"")+"$"+Math.abs(Math.round(v)).toLocaleString();
@@ -635,6 +636,7 @@ async function pushToCloud(quiet){
     state.updated = state.updated || Date.now();
     const { error } = await sb.from("app_data").upsert({ id:CLOUD_ROW_ID, data:state, updated_at:new Date().toISOString() });
     if(error) throw error;
+    lastSyncedUpdated = state.updated; // this device is now clean/in-sync
     if(!quiet) setSyncStatus("Synced just now","var(--green)"); else refreshSyncUI();
   }catch(e){ console.log("push failed",e); setSyncStatus("Sync failed (will retry)","var(--red)"); }
   syncing=false;
@@ -642,6 +644,7 @@ async function pushToCloud(quiet){
 async function pullFromCloud(opts){
   opts=opts||{};
   if(!currentUser||!sb) return;
+  if(syncing) return;
   try{
     const { data, error } = await sb.from("app_data").select("data,updated_at").eq("id",CLOUD_ROW_ID).maybeSingle();
     if(error) throw error;
@@ -654,24 +657,46 @@ async function pullFromCloud(opts){
     const localUpdated = (state && state.updated) || 0;
     const cloudHasData = cloud.accounts && cloud.accounts.length;
     const localHasData = state && state.accounts && state.accounts.length;
+    // has THIS device made edits since its last successful sync?
+    const localDirty = localUpdated > lastSyncedUpdated;
+
     if(!localHasData && cloudHasData){ applyCloud(cloud); return; }
+
     if(cloudHasData && cloudUpdated > localUpdated){
-      const when = new Date(cloudUpdated).toLocaleString();
-      if(confirm("The synced copy (last saved "+when+") is newer than what's on this device.\n\nOK = load the synced copy.\nCancel = keep this device's copy.")){
+      // cloud is newer than us
+      if(!localDirty){
+        // we have no unsynced local edits -> safe to load cloud silently
         applyCloud(cloud);
+        return;
+      }
+      // BOTH sides changed since last sync = genuine conflict -> ask
+      const when = new Date(cloudUpdated).toLocaleString();
+      if(opts.background){
+        // gently prompt on return-to-app
+        if(confirm("Heads up: the synced copy (saved "+when+") changed on another device, and you've also made changes here.\n\nOK = load the synced copy (discards this device's unsaved changes).\nCancel = keep this device's copy and push it up.")){
+          applyCloud(cloud);
+        } else {
+          await pushToCloud(false);
+        }
       } else {
-        await pushToCloud(false);
+        if(confirm("The synced copy (last saved "+when+") is newer than what's on this device.\n\nOK = load the synced copy.\nCancel = keep this device's copy.")){
+          applyCloud(cloud);
+        } else {
+          await pushToCloud(false);
+        }
       }
     } else {
+      // we're newer or equal -> push up if we have data
       if(localHasData) await pushToCloud(true);
     }
-  }catch(e){ console.log("pull failed",e); setSyncStatus("Sync check failed","var(--red)"); }
+  }catch(e){ console.log("pull failed",e); if(!opts.background) setSyncStatus("Sync check failed","var(--red)"); }
 }
 function applyCloud(cloud){
   state=cloud;
   state.bal=state.bal||{}; state.buffer=state.buffer||{}; state.paid=state.paid||{}; state.items=state.items||[]; state.accounts=state.accounts||[];
   state.accounts.forEach(a=>{ if(state.bal[a]===undefined)state.bal[a]=0; if(state.buffer[a]===undefined)state.buffer[a]=0; if(!state.paid[a])state.paid[a]=[]; });
   try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){}
+  lastSyncedUpdated = state.updated || Date.now(); // loaded cloud = this device is clean/in-sync
   cur = (state.accounts.includes(cur)? cur : state.accounts[0]) || null;
   if(state.accounts.length){ show("trackerScreen"); buildTabs(); syncBalInput(); render(); }
   setSyncStatus("Synced just now","var(--green)");
@@ -957,6 +982,18 @@ document.getElementById("signOutBtn").onclick=()=>{ closeDrawer(); doSignOut(); 
 document.getElementById("menuBtn").onclick=openDrawer;
 document.getElementById("drawerClose").onclick=closeDrawer;
 document.getElementById("drawerScrim").onclick=closeDrawer;
+
+/* ---------------- PULL ON RETURN-TO-APP (Option A) ---------------- */
+let lastFocusPull=0;
+function focusPull(){
+  if(!currentUser||!sb) return;
+  const now=Date.now();
+  if(now-lastFocusPull < 4000) return; // debounce: don't spam if focus fires repeatedly
+  lastFocusPull=now;
+  pullFromCloud({background:true});
+}
+window.addEventListener("focus", focusPull);
+document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="visible") focusPull(); });
 
 /* ---------------- BOOT ---------------- */
 document.getElementById("verNum").textContent=APP_VERSION;
