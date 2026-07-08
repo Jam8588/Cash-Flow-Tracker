@@ -109,6 +109,12 @@
   .addform input,.addform select{font-size:14px; padding:9px; border:1px solid var(--border); border-radius:8px; background:var(--surface); color:var(--text); width:100%;}
   #formScrim{position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:55; display:none;}
   #formScrim.open{display:block;}
+  .modal{position:fixed; inset:0; z-index:70; display:none; align-items:center; justify-content:center; padding:16px;}
+  .modal.open{display:flex;}
+  .modal .box{background:var(--surface); border-radius:14px; padding:20px; width:100%; max-width:380px; box-shadow:0 12px 40px rgba(0,0,0,.25);}
+  .modal .box h3{margin:0 0 12px; font-size:17px;}
+  .modal .box input{width:100%; font-size:15px; padding:10px; border:1px solid var(--border); border-radius:8px; margin-bottom:10px; background:var(--surface); color:var(--text);}
+  .syncdot{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle;}
 </style>
 </head>
 <body>
@@ -119,6 +125,11 @@
     <span style="font-size:16px; font-weight:600;">Menu</span>
     <button id="drawerClose" aria-label="Close" style="background:none; border:none; font-size:22px; cursor:pointer; color:var(--muted); line-height:1;">×</button>
   </div>
+  <p class="drawerhdr">Sync</p>
+  <p id="syncStatus" style="font-size:12px; color:var(--muted); padding:2px 10px; margin:0 0 4px;">Not signed in</p>
+  <button class="draweritem" id="signInBtn">Sign in to sync</button>
+  <button class="draweritem hide" id="syncNowBtn">Sync now</button>
+  <button class="draweritem hide" id="signOutBtn">Sign out</button>
   <p class="drawerhdr">Account</p>
   <button class="draweritem" id="renameAcctBtn">Rename account</button>
   <button class="draweritem" id="delAcctBtn">Delete account</button>
@@ -130,8 +141,24 @@
   <button class="draweritem" id="feedbackBtn">Send feedback / request a feature</button>
   <p class="drawerhdr">Start over</p>
   <button class="draweritem danger" id="resetBtn">Reset all</button>
-  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v16</span></p>
+  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v17</span></p>
 </nav>
+
+<!-- Sign-in modal -->
+<div class="modal" id="signInModal">
+  <div class="box">
+    <h3>Sign in to sync</h3>
+    <p class="note" style="margin:0 0 12px;">Use your shared account. Your data will sync across devices you sign in on.</p>
+    <input id="siEmail" type="email" placeholder="Email" autocomplete="username" />
+    <input id="siPass" type="password" placeholder="Password" autocomplete="current-password" />
+    <div class="btnrow" style="margin-bottom:0;">
+      <button class="btn primary" id="siGo">Sign in</button>
+      <button class="btn" id="siCancel">Cancel</button>
+    </div>
+    <p class="note" id="siMsg" style="margin-top:8px;"></p>
+  </div>
+</div>
+
 <div class="wrap">
   <h1>Cash Flow Tracker</h1>
   <p class="sub">Import your last 3–6 months of statements. Everything stays private on this device.</p>
@@ -220,11 +247,20 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 if (window.pdfjsLib) { pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; }
 
+/* ---------------- SUPABASE SYNC CONFIG ---------------- */
+const SB_URL="https://awombiukbktiqbnbgcdc.supabase.co";
+const SB_KEY="sb_publishable_eH8T2hBMl6Xbkk0ysF5sDA_u2zsOTMv";
+const CLOUD_ROW_ID="household";
+let sb=null;
+try{ if(window.supabase&&window.supabase.createClient){ sb=window.supabase.createClient(SB_URL, SB_KEY); } }catch(e){ console.log("supabase init failed",e); }
+let currentUser=null, syncing=false, autoSyncTimer=null;
+
 const KEY = "cashflow_multi_v1";
-const APP_VERSION = "v16";
+const APP_VERSION = "v17";
 const DAY = 864e5;
 const fmt = (v)=>(v<0?"-":"")+"$"+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmt0 = (v)=>(v<0?"-":"")+"$"+Math.abs(Math.round(v)).toLocaleString();
@@ -233,9 +269,9 @@ const okey=(id,dt)=>id+"@"+dt.getFullYear()+"-"+dt.getMonth()+"-"+dt.getDate();
 const iso=(d)=>d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
 const parseISO=(s)=>{const p=s.split("-");return new Date(+p[0],+p[1]-1,+p[2]);};
 
-let pending = [];        // {fileName, account, txns:[{date,desc,amt}]}
-let detected = [];       // review rows
-let state = null;        // {accounts:[], items:[], bal:{}, buffer:{}, paid:{}}
+let pending = [];
+let detected = [];
+let state = null;
 let cur = null;
 
 /* ---------------- FILE INTAKE ---------------- */
@@ -256,7 +292,6 @@ function accountFromName(fn){
   if(s.includes("cibc")) return "CIBC";
   if(s.includes("bmo")) return "BMO";
   if(s.includes("triangle")||s.includes("mastercard")||s.includes("visa")) return "Credit Card";
-  // fallback: strip extension + digits
   return fn.replace(/\.[^.]+$/,"").replace(/[0-9_\-]+/g," ").trim().slice(0,24) || "Account";
 }
 
@@ -297,10 +332,8 @@ function parseCSV(file){
       const find=(...names)=>{ for(const n of names){ const i=cols.findIndex(c=>c.includes(n)); if(i>=0) return realKeys[i]; } return null; };
       const findExact=(...names)=>{ for(const n of names){ const i=cols.findIndex(c=>c===n); if(i>=0) return realKeys[i]; } return null; };
       const cDate=find("transaction date","posted date","date");
-      // description: gather ALL columns whose header includes "description"/"details"/"memo"/"narration"/"payee"/"name"
       const descCols=realKeys.filter((k,idx)=>/desc|detail|memo|narration|payee|^name$|transaction detail/.test(cols[idx]));
       const cDescSingle=find("description","details","memo","narration","payee","name");
-      // amount: RBC uses "CAD$"; others "amount"/"value"
       const cAmt=findExact("cad$","amount","value") || find("cad$","amount ","amount","value","net");
       const cDebit=find("debit","withdrawal","paid out","money out","funds out");
       const cCredit=find("credit","deposit","paid in","money in","funds in");
@@ -341,7 +374,6 @@ async function parsePDF(file){
   let lines=[];
   for(let p=1;p<=pdf.numPages;p++){
     const page=await pdf.getPage(p); const tc=await page.getTextContent();
-    // group text items by y to reconstruct lines
     const byY={};
     tc.items.forEach(it=>{ const y=Math.round(it.transform[5]); (byY[y]=byY[y]||[]).push(it.str); });
     Object.keys(byY).sort((a,b)=>b-a).forEach(y=> lines.push(byY[y].join(" ")));
@@ -355,7 +387,6 @@ async function parsePDF(file){
     const amt=num(amts[amts.length-1]);
     if(!amt) return;
     const desc=line.replace(amtRe,"").replace(/^\s*[\d\/\-\.a-z, ]{6,18}/i,"").trim().slice(0,40) || "Transaction";
-    // heuristic: deposits/credits often say deposit/payroll/credit
     const isCredit=/deposit|payroll|credit|received|refund|paid in/i.test(line);
     out.push({date:dt, desc, amt: isCredit? Math.abs(amt) : -Math.abs(amt)});
   });
@@ -371,21 +402,18 @@ document.getElementById("analyzeBtn").onclick=()=>{
 };
 function normDesc(d){
   return d.toLowerCase()
-    .replace(/\b\d{2,}\b/g,"")            // strip long digit runs (store #s, ref #s)
-    .replace(/[#*].*$/,"")                // strip trailing ref codes
+    .replace(/\b\d{2,}\b/g,"")
+    .replace(/[#*].*$/,"")
     .replace(/\b(inc|ltd|corp|co|the)\b/g,"")
     .replace(/[^a-z ]/g," ").replace(/\s+/g," ").trim();
 }
 function median(arr){ const s=[...arr].sort((a,b)=>a-b); const m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; }
-// group a payee's transactions into clusters of similar amount
 function clusterByAmount(entries){
-  // entries: [{amt,date}], sorted by amt
   const sorted=[...entries].sort((a,b)=>a.amt-b.amt);
   const clusters=[]; let cur=[];
   sorted.forEach(e=>{
     if(!cur.length){ cur=[e]; return; }
     const med=median(cur.map(x=>x.amt));
-    // same cluster if within 15% (or $5) of the running median
     if(Math.abs(e.amt-med) <= Math.max(5, med*0.15)){ cur.push(e); }
     else { clusters.push(cur); cur=[e]; }
   });
@@ -393,7 +421,7 @@ function clusterByAmount(entries){
   return clusters;
 }
 function detectRecurring(files){
-  const groups={}; // key: account||normDesc -> {account,name,entries:[{amt,date}],sign}
+  const groups={};
   files.forEach(f=>{
     f.txns.forEach(t=>{
       const nd=normDesc(t.desc); if(nd.length<3) return;
@@ -405,19 +433,15 @@ function detectRecurring(files){
   const rows=[];
   const today=new Date(); today.setHours(0,0,0,0);
   Object.values(groups).forEach(g=>{
-    // split this payee into amount-clusters, evaluate each separately
     const clusters=clusterByAmount(g.entries);
     clusters.forEach(cl=>{
       const dates=cl.map(e=>e.date);
       const amts=cl.map(e=>e.amt);
       const monthsSeen=new Set(dates.map(d=>d.getFullYear()+"-"+d.getMonth())).size;
-      // recurring if this cluster appears in >=2 months OR >=3 times
       if(dates.length<2 || (monthsSeen<2 && dates.length<3)) return;
       const med=median(amts);
       const within=amts.filter(a=>Math.abs(a-med)<=Math.max(5, med*0.15)).length;
       if(within/amts.length < 0.6) return;
-      // Noise filter: small everyday card purchases can repeat by coincidence.
-      // Keep a small card-type item only if it recurs across most months.
       const looksLikeCardPurchase=/purchase|interac|contactless|pos |point of sale|debit retail/i.test(g.name);
       if(med < 100 && looksLikeCardPurchase && monthsSeen < 3) return;
       const sorted=[...dates].sort((a,b)=>a-b);
@@ -495,7 +519,6 @@ document.getElementById("populateBtn").onclick=()=>{
   const chosen=detected.filter(r=>r.use);
   const accts=[...new Set(chosen.map(r=>r.account))];
   if(!accts.length){ document.getElementById("reviewStatus").textContent="Tick at least one item, or go back and set up manually."; return; }
-  // MERGE into existing setup if there is one; otherwise start fresh.
   if(!state || !state.accounts){ state={accounts:[], items:[], bal:{}, buffer:{}, paid:{}}; }
   accts.forEach(a=>{
     if(!state.accounts.includes(a)) state.accounts.push(a);
@@ -517,7 +540,7 @@ document.getElementById("skipBtn").onclick=()=>{
   state={accounts:["Account 1"], items:[], bal:{"Account 1":0}, buffer:{"Account 1":0}, paid:{"Account 1":[]}};
   cur="Account 1"; save(); show("trackerScreen"); buildTabs(); syncBalInput(); render();
 };
-document.getElementById("reimportBtn").onclick=()=>{ pending=[]; detected=[]; renderFileList(); document.getElementById("importStatus").textContent = (state&&state.accounts&&state.accounts.length)? "Adding to your existing setup ("+state.accounts.join(", ")+"). New imports won't erase what's there." : ""; show("importScreen"); };
+document.getElementById("reimportBtn").onclick=()=>{ closeDrawer(); pending=[]; detected=[]; renderFileList(); document.getElementById("importStatus").textContent = (state&&state.accounts&&state.accounts.length)? "Adding to your existing setup ("+state.accounts.join(", ")+"). New imports won't erase what's there." : ""; show("importScreen"); };
 
 /* ---------------- TRACKER (multi-account) ---------------- */
 function show(id){ ["importScreen","reviewScreen","trackerScreen"].forEach(s=>document.getElementById(s).classList.toggle("hide", s!==id));
@@ -527,7 +550,7 @@ function show(id){ ["importScreen","reviewScreen","trackerScreen"].forEach(s=>do
 }
 function openDrawer(){ document.getElementById("drawer").style.transform="translateX(0)"; document.getElementById("drawerScrim").classList.remove("hide"); }
 function closeDrawer(){ const d=document.getElementById("drawer"); if(d) d.style.transform="translateX(-100%)"; const s=document.getElementById("drawerScrim"); if(s) s.classList.add("hide"); }
-function save(){ try{localStorage.setItem(KEY, JSON.stringify(state));}catch(e){} }
+function save(){ try{ if(state) state.updated=Date.now(); localStorage.setItem(KEY, JSON.stringify(state));}catch(e){} scheduleAutoSync(); }
 function load(){ try{const r=localStorage.getItem(KEY); if(r){state=JSON.parse(r);} }catch(e){} }
 
 /* ---------------- UNDO (one step) ---------------- */
@@ -585,6 +608,99 @@ function restoreData(file){
   reader.readAsText(file);
 }
 
+/* ---------------- CLOUD SYNC ---------------- */
+function setSyncStatus(txt, color){
+  const el=document.getElementById("syncStatus"); if(!el) return;
+  el.innerHTML = (color? '<span class="syncdot" style="background:'+color+'"></span>':'') + txt;
+}
+function refreshSyncUI(){
+  const signedIn=!!currentUser;
+  document.getElementById("signInBtn").classList.toggle("hide", signedIn);
+  document.getElementById("syncNowBtn").classList.toggle("hide", !signedIn);
+  document.getElementById("signOutBtn").classList.toggle("hide", !signedIn);
+  if(signedIn){ setSyncStatus("Signed in as "+currentUser.email, "var(--green)"); }
+  else { setSyncStatus("Not signed in (this device only)", "var(--muted)"); }
+}
+function scheduleAutoSync(){
+  if(!currentUser||!sb) return;
+  clearTimeout(autoSyncTimer);
+  autoSyncTimer=setTimeout(()=>{ pushToCloud(true); }, 2500);
+}
+async function pushToCloud(quiet){
+  if(!currentUser||!sb||!state) return;
+  if(syncing) return;
+  syncing=true;
+  if(!quiet) setSyncStatus("Syncing…","var(--amber)");
+  try{
+    state.updated = state.updated || Date.now();
+    const { error } = await sb.from("app_data").upsert({ id:CLOUD_ROW_ID, data:state, updated_at:new Date().toISOString() });
+    if(error) throw error;
+    if(!quiet) setSyncStatus("Synced just now","var(--green)"); else refreshSyncUI();
+  }catch(e){ console.log("push failed",e); setSyncStatus("Sync failed (will retry)","var(--red)"); }
+  syncing=false;
+}
+async function pullFromCloud(opts){
+  opts=opts||{};
+  if(!currentUser||!sb) return;
+  try{
+    const { data, error } = await sb.from("app_data").select("data,updated_at").eq("id",CLOUD_ROW_ID).maybeSingle();
+    if(error) throw error;
+    if(!data || !data.data){
+      if(state && state.accounts && state.accounts.length){ await pushToCloud(false); }
+      return;
+    }
+    const cloud=data.data;
+    const cloudUpdated = cloud.updated || Date.parse(data.updated_at) || 0;
+    const localUpdated = (state && state.updated) || 0;
+    const cloudHasData = cloud.accounts && cloud.accounts.length;
+    const localHasData = state && state.accounts && state.accounts.length;
+    if(!localHasData && cloudHasData){ applyCloud(cloud); return; }
+    if(cloudHasData && cloudUpdated > localUpdated){
+      const when = new Date(cloudUpdated).toLocaleString();
+      if(confirm("The synced copy (last saved "+when+") is newer than what's on this device.\n\nOK = load the synced copy.\nCancel = keep this device's copy.")){
+        applyCloud(cloud);
+      } else {
+        await pushToCloud(false);
+      }
+    } else {
+      if(localHasData) await pushToCloud(true);
+    }
+  }catch(e){ console.log("pull failed",e); setSyncStatus("Sync check failed","var(--red)"); }
+}
+function applyCloud(cloud){
+  state=cloud;
+  state.bal=state.bal||{}; state.buffer=state.buffer||{}; state.paid=state.paid||{}; state.items=state.items||[]; state.accounts=state.accounts||[];
+  state.accounts.forEach(a=>{ if(state.bal[a]===undefined)state.bal[a]=0; if(state.buffer[a]===undefined)state.buffer[a]=0; if(!state.paid[a])state.paid[a]=[]; });
+  try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){}
+  cur = (state.accounts.includes(cur)? cur : state.accounts[0]) || null;
+  if(state.accounts.length){ show("trackerScreen"); buildTabs(); syncBalInput(); render(); }
+  setSyncStatus("Synced just now","var(--green)");
+}
+async function doSignIn(email, pass){
+  if(!sb){ document.getElementById("siMsg").textContent="Sync unavailable (offline?)."; return; }
+  document.getElementById("siMsg").textContent="Signing in…";
+  const { data, error } = await sb.auth.signInWithPassword({ email, password:pass });
+  if(error){ document.getElementById("siMsg").textContent="Sign-in failed: "+error.message; return; }
+  currentUser=data.user;
+  document.getElementById("signInModal").classList.remove("open");
+  refreshSyncUI();
+  await pullFromCloud({});
+}
+async function doSignOut(){
+  if(sb){ try{ await sb.auth.signOut(); }catch(e){} }
+  currentUser=null;
+  refreshSyncUI();
+  document.getElementById("status").textContent="Signed out. This device keeps its own local copy.";
+}
+async function initAuth(){
+  if(!sb){ refreshSyncUI(); return; }
+  try{
+    const { data } = await sb.auth.getSession();
+    if(data && data.session){ currentUser=data.session.user; refreshSyncUI(); await pullFromCloud({}); }
+    else refreshSyncUI();
+  }catch(e){ refreshSyncUI(); }
+}
+
 function buildTabs(){
   const el=document.getElementById("tabs"); el.innerHTML="";
   state.accounts.forEach(a=>{
@@ -628,9 +744,7 @@ function render(){
   let html=""; let lastMonth="";
   sched.forEach(o=>{
     const isPaid=paid.has(o.key);
-    // running balance / lowest-point always use the FULL schedule (not filtered)
     if(!isPaid){ bal+=(o.t==="in"?o.a:-o.a); if(firstAfter===null){firstAfter=bal;firstName=o.n;} if(bal<low){low=bal;lowDate=o.date;} }
-    // but only DISPLAY rows matching the search
     if(query && !o.n.toLowerCase().includes(query)) return;
     const mo=o.date.toLocaleDateString(undefined,{month:"long",year:"numeric"});
     if(mo!==lastMonth){ html+='<div class="monthhdr">'+mo+'</div>'; lastMonth=mo; }
@@ -665,7 +779,7 @@ function render(){
   save();
 }
 
-let summaryScope="current"; // "current" or "all"
+let summaryScope="current";
 let summaryCollapsed = (localStorage.getItem("cf_sumCollapsed")==="1");
 function monthKey(d){ return d.getFullYear()+"-"+String(d.getMonth()).padStart(2,"0"); }
 function monthLabel(d){ return d.toLocaleDateString(undefined,{month:"short",year:"numeric"}); }
@@ -832,6 +946,14 @@ document.getElementById("restoreBtn").onclick=()=>{ closeDrawer(); document.getE
 document.getElementById("feedbackBtn").onclick=()=>{ closeDrawer(); window.open("https://docs.google.com/forms/d/e/1FAIpQLSchvp00o375WyLc2jHZ3RyH38Z44CIN4PHcjeXEefDpF10Qbg/viewform","_blank"); };
 document.getElementById("restoreFile").addEventListener("change",e=>{ if(e.target.files[0]) restoreData(e.target.files[0]); e.target.value=""; });
 
+/* sync controls */
+document.getElementById("signInBtn").onclick=()=>{ closeDrawer(); document.getElementById("siMsg").textContent=""; document.getElementById("signInModal").classList.add("open"); };
+document.getElementById("siCancel").onclick=()=>document.getElementById("signInModal").classList.remove("open");
+document.getElementById("siGo").onclick=()=>{ const em=document.getElementById("siEmail").value.trim(); const pw=document.getElementById("siPass").value; if(!em||!pw){ document.getElementById("siMsg").textContent="Enter email and password."; return;} doSignIn(em,pw); };
+document.getElementById("siPass").addEventListener("keydown",e=>{ if(e.key==="Enter") document.getElementById("siGo").click(); });
+document.getElementById("syncNowBtn").onclick=async()=>{ closeDrawer(); await pullFromCloud({}); if(currentUser) await pushToCloud(false); };
+document.getElementById("signOutBtn").onclick=()=>{ closeDrawer(); doSignOut(); };
+
 document.getElementById("menuBtn").onclick=openDrawer;
 document.getElementById("drawerClose").onclick=closeDrawer;
 document.getElementById("drawerScrim").onclick=closeDrawer;
@@ -841,6 +963,8 @@ document.getElementById("verNum").textContent=APP_VERSION;
 load();
 if(state && state.accounts && state.accounts.length){ cur=state.accounts[0]; show("trackerScreen"); buildTabs(); syncBalInput(); render(); }
 else { show("importScreen"); }
+refreshSyncUI();
+initAuth();
 
 if("serviceWorker" in navigator){ window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{})); }
 </script>
