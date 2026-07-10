@@ -70,6 +70,9 @@
   .row{display:grid; grid-template-columns:auto 1fr auto auto; gap:10px; align-items:center;
     padding:9px 4px; border-bottom:1px solid var(--border);}
   .row.paid{opacity:.6;}
+  .row.overdue{background:#fdf6e9; border-radius:8px;}
+  .dismissbtn{background:none; border:none; color:var(--muted); cursor:pointer; font-size:15px; padding:0 6px; opacity:.6; text-align:right;}
+  .dismissbtn:hover{opacity:1; color:var(--red);}
   .chk{width:26px; height:26px; padding:0; border-radius:6px; border:1px solid var(--border);
     background:var(--surface); cursor:pointer; font-size:14px; color:var(--muted);}
   .chk.on{background:var(--green-bg); border-color:var(--green-bd); color:var(--green);}
@@ -141,7 +144,7 @@
   <button class="draweritem" id="feedbackBtn">Send feedback / request a feature</button>
   <p class="drawerhdr">Start over</p>
   <button class="draweritem danger" id="resetBtn">Reset all</button>
-  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v18</span></p>
+  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v20</span></p>
 </nav>
 
 <!-- Sign-in modal -->
@@ -228,7 +231,8 @@
         <input id="nAmt" type="number" step="0.01" placeholder="Amount" />
         <select id="nType"><option value="out">Payment (out)</option><option value="in">Income (in)</option></select>
         <select id="nFreq"><option value="monthly">Monthly</option><option value="semi">Semi-monthly</option><option value="biweekly">Biweekly</option><option value="weekly">Weekly</option><option value="once">One-time</option></select>
-        <input id="nDay" type="number" min="1" max="31" placeholder="Day of month" />
+        <input id="nDate" type="date" title="Pick a date this occurs on" />
+        <input id="nDay" type="number" min="1" max="31" placeholder="Day of month" class="hide" />
         <input id="nAnchor" type="date" class="hide" />
       </div>
       <div class="btnrow" style="margin-top:10px; margin-bottom:0;">
@@ -261,7 +265,7 @@ let currentUser=null, syncing=false, autoSyncTimer=null;
 let lastSyncedUpdated=0; // the state.updated value at our last successful push/pull (this device's "clean" marker)
 
 const KEY = "cashflow_multi_v1";
-const APP_VERSION = "v18";
+const APP_VERSION = "v20";
 const DAY = 864e5;
 const fmt = (v)=>(v<0?"-":"")+"$"+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmt0 = (v)=>(v<0?"-":"")+"$"+Math.abs(Math.round(v)).toLocaleString();
@@ -697,7 +701,8 @@ function applyCloud(cloud){
   state.accounts.forEach(a=>{ if(state.bal[a]===undefined)state.bal[a]=0; if(state.buffer[a]===undefined)state.buffer[a]=0; if(!state.paid[a])state.paid[a]=[]; });
   try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){}
   lastSyncedUpdated = state.updated || Date.now(); // loaded cloud = this device is clean/in-sync
-  cur = (state.accounts.includes(cur)? cur : state.accounts[0]) || null;
+  let saved=null; try{saved=localStorage.getItem("cf_curAcct");}catch(e){}
+  cur = (state.accounts.includes(cur)? cur : (saved && state.accounts.includes(saved)? saved : state.accounts[0])) || null;
   if(state.accounts.length){ show("trackerScreen"); buildTabs(); syncBalInput(); render(); }
   setSyncStatus("Synced just now","var(--green)");
 }
@@ -730,31 +735,38 @@ function buildTabs(){
   const el=document.getElementById("tabs"); el.innerHTML="";
   state.accounts.forEach(a=>{
     const b=document.createElement("button"); b.className="tab"+(a===cur?" active":""); b.textContent=a;
-    b.onclick=()=>{ state.bal[cur]=parseFloat(document.getElementById("curBal").value)||0; cur=a; buildTabs(); syncBalInput(); render(); };
+    b.onclick=()=>{ state.bal[cur]=parseFloat(document.getElementById("curBal").value)||0; cur=a; try{localStorage.setItem("cf_curAcct",a);}catch(e){} buildTabs(); syncBalInput(); render(); };
     el.appendChild(b);
   });
 }
 function syncBalInput(){ document.getElementById("curBal").value=(state.bal[cur]||0).toFixed(2); document.getElementById("curLbl").textContent=cur+" balance"; }
 
-function occurrencesFor(it, today, horizon){
-  const out=[]; const push=(dt)=>{ if(dt>=today&&dt<=horizon) out.push(new Date(dt)); };
-  if(it.freq==="monthly"){ for(let m=0;m<3;m++){const b=new Date(today.getFullYear(),today.getMonth()+m,1); push(clampDay(b.getFullYear(),b.getMonth(),it.day));} }
+function occurrencesFor(it, today, horizon, back){
+  // back = earliest date to include (today minus lookback). Past occurrences after `back`
+  // are included so a missed/late item stays visible until checked off or dismissed.
+  const start = back || today;
+  const out=[]; const push=(dt)=>{ if(dt>=start&&dt<=horizon) out.push(new Date(dt)); };
+  if(it.freq==="monthly"){ for(let m=-2;m<3;m++){const b=new Date(today.getFullYear(),today.getMonth()+m,1); push(clampDay(b.getFullYear(),b.getMonth(),it.day));} }
   else if(it.freq==="semi"){ const d2=it.day<=15?it.day+15:it.day-15; const days=[Math.min(it.day,d2),Math.max(it.day,d2)];
-    for(let m=0;m<3;m++){const b=new Date(today.getFullYear(),today.getMonth()+m,1); days.forEach(dd=>push(clampDay(b.getFullYear(),b.getMonth(),dd)));} }
+    for(let m=-2;m<3;m++){const b=new Date(today.getFullYear(),today.getMonth()+m,1); days.forEach(dd=>push(clampDay(b.getFullYear(),b.getMonth(),dd)));} }
   else if(it.freq==="biweekly"){ let a=it.anchor?parseISO(it.anchor):clampDay(today.getFullYear(),today.getMonth(),it.day||today.getDate()); a.setHours(0,0,0,0);
-    let c=new Date(a); if(c>today){ while(c-14*DAY>=today.getTime()) c=new Date(c.getTime()-14*DAY);} else { while(c<today) c=new Date(c.getTime()+14*DAY);}
+    let c=new Date(a); while(c>start) c=new Date(c.getTime()-14*DAY); while(c<start) c=new Date(c.getTime()+14*DAY);
     for(; c<=horizon; c=new Date(c.getTime()+14*DAY)) push(c); }
   else if(it.freq==="weekly"){ let a=it.anchor?parseISO(it.anchor):clampDay(today.getFullYear(),today.getMonth(),it.day||today.getDate()); a.setHours(0,0,0,0);
-    let c=new Date(a); if(c>today){ while(c-7*DAY>=today.getTime()) c=new Date(c.getTime()-7*DAY);} else { while(c<today) c=new Date(c.getTime()+7*DAY);}
+    let c=new Date(a); while(c>start) c=new Date(c.getTime()-7*DAY); while(c<start) c=new Date(c.getTime()+7*DAY);
     for(; c<=horizon; c=new Date(c.getTime()+7*DAY)) push(c); }
-  else if(it.freq==="once"){ push(clampDay(today.getFullYear(),today.getMonth(),it.day)); }
+  else if(it.freq==="once"){ for(let m=-2;m<3;m++){const b=new Date(today.getFullYear(),today.getMonth()+m,1); push(clampDay(b.getFullYear(),b.getMonth(),it.day));} }
   return out;
 }
 function buildSchedule(items){
   const today=new Date(); today.setHours(0,0,0,0); const horizon=new Date(today.getTime()+60*DAY);
+  const back=new Date(today.getTime()-40*DAY); // keep recently-missed items visible
+  const dismissed=new Set(state.dismissed && state.dismissed[cur] ? state.dismissed[cur] : []);
   const seen=new Set(); let occ=[];
-  items.forEach(it=> occurrencesFor(it,today,horizon).forEach(dt=>{ const k=okey(it.id,dt); if(seen.has(k))return; seen.add(k);
-    occ.push({id:it.id,key:k,n:it.n,a:it.a,t:it.t,freq:it.freq,date:dt}); }));
+  items.forEach(it=> occurrencesFor(it,today,horizon,back).forEach(dt=>{ const k=okey(it.id,dt); if(seen.has(k))return; seen.add(k);
+    if(dismissed.has(k)) return; // manually dismissed -> hide entirely
+    const overdue = dt<today;
+    occ.push({id:it.id,key:k,n:it.n,a:it.a,t:it.t,freq:it.freq,date:dt,overdue}); }));
   occ.sort((a,b)=> a.date-b.date || (a.t==="in"?-1:1) || a.n.localeCompare(b.n));
   return occ;
 }
@@ -766,24 +778,34 @@ function render(){
   const sched=buildSchedule(items);
   const query=(document.getElementById("searchBox").value||"").trim().toLowerCase();
   let bal=state.bal[cur], low=bal, lowDate=null, firstAfter=null, firstName="";
-  let html=""; let lastMonth="";
+  let html=""; let overdueHtml=""; let lastMonth="";
   sched.forEach(o=>{
     const isPaid=paid.has(o.key);
     if(!isPaid){ bal+=(o.t==="in"?o.a:-o.a); if(firstAfter===null){firstAfter=bal;firstName=o.n;} if(bal<low){low=bal;lowDate=o.date;} }
     if(query && !o.n.toLowerCase().includes(query)) return;
-    const mo=o.date.toLocaleDateString(undefined,{month:"long",year:"numeric"});
-    if(mo!==lastMonth){ html+='<div class="monthhdr">'+mo+'</div>'; lastMonth=mo; }
-    const dstr=o.date.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"});
     const isIn=o.t==="in"; const short=(!isPaid)&&bal<buffer;
     const balCls=isPaid?"paid":(bal<0?"neg":(short?"warn":"ok"));
     const balTxt=isPaid?"paid":(fmt0(bal)+(bal<0?" !":(short?" *":"")));
+    const dstr=o.date.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"});
+    if(o.overdue && !isPaid){
+      overdueHtml+='<div class="row overdue">'+
+        '<button class="chk" data-key="'+o.key+'" data-id="'+o.id+'" title="Mark paid">✓</button>'+
+        '<div style="min-width:0;"><div style="display:flex; align-items:center; gap:2px;"><span class="nm">'+o.n+'</span><button class="editbtn" data-edit="'+o.id+'" title="Edit">✎</button></div><div class="dt" style="color:var(--amber);">was due '+dstr+'</div></div>'+
+        '<div class="amt '+(isIn?'in':'out')+'">'+(isIn?"+":"−")+fmt(o.a)+'</div>'+
+        '<button class="dismissbtn" data-dismiss="'+o.key+'" title="Dismiss">✕</button></div>';
+      return;
+    }
+    const mo=o.date.toLocaleDateString(undefined,{month:"long",year:"numeric"});
+    if(mo!==lastMonth){ html+='<div class="monthhdr">'+mo+'</div>'; lastMonth=mo; }
     html+='<div class="row '+(isPaid?'paid':'')+'">'+
       '<button class="chk '+(isPaid?'on':'')+'" data-key="'+o.key+'" data-id="'+o.id+'">✓</button>'+
       '<div style="min-width:0;"><div style="display:flex; align-items:center; gap:2px;"><span class="nm '+(isPaid?'paid':'')+'">'+o.n+'</span><button class="editbtn" data-edit="'+o.id+'" title="Edit">✎</button></div><div class="dt">'+dstr+'</div></div>'+
       '<div class="amt '+(isPaid?'muted':(isIn?'in':'out'))+'">'+(isIn?"+":"−")+fmt(o.a)+'</div>'+
       '<div class="bal '+balCls+'">'+balTxt+'</div></div>';
   });
-  document.getElementById("rows").innerHTML = html || '<p style="color:var(--muted); font-size:14px; padding:12px 0;">'+(query?'No transactions match "'+query+'".':'No upcoming items for this account.')+'</p>';
+  if(overdueHtml){ overdueHtml='<div class="monthhdr" style="color:var(--amber);">Overdue / not yet cleared</div>'+overdueHtml; }
+  const bodyHtml=overdueHtml+html;
+  document.getElementById("rows").innerHTML = bodyHtml || '<p style="color:var(--muted); font-size:14px; padding:12px 0;">'+(query?'No transactions match "'+query+'".':'No upcoming items for this account.')+'</p>';
   renderMonthSummary(paid);
   const af=document.getElementById("afterNext"); af.textContent=firstAfter===null?"—":fmt0(firstAfter);
   af.style.color=firstAfter===null?"var(--text)":(firstAfter<0?"var(--red)":(firstAfter<buffer?"var(--amber)":"var(--text)"));
@@ -801,6 +823,16 @@ function render(){
     };
   });
   document.querySelectorAll(".editbtn").forEach(b=>{ b.onclick=()=>openEdit(b.dataset.edit); });
+  document.querySelectorAll(".dismissbtn").forEach(b=>{
+    b.onclick=()=>{
+      const key=b.dataset.dismiss;
+      if(!state.dismissed) state.dismissed={};
+      if(!state.dismissed[cur]) state.dismissed[cur]=[];
+      if(!state.dismissed[cur].includes(key)) state.dismissed[cur].push(key);
+      save(); render();
+      document.getElementById("status").textContent="Dismissed. (It won't affect your balance.)";
+    };
+  });
   save();
 }
 
@@ -865,9 +897,15 @@ function openEdit(id){
   document.getElementById("nFreq").value=it.freq;
   const needsAnchor=(it.freq==="biweekly"||it.freq==="weekly");
   document.getElementById("nAnchor").classList.toggle("hide", !needsAnchor);
-  document.getElementById("nDay").classList.toggle("hide", needsAnchor);
+  document.getElementById("nDate").classList.toggle("hide", needsAnchor);
+  document.getElementById("nDay").classList.add("hide");
   if(needsAnchor){ document.getElementById("nAnchor").value=it.anchor||""; }
-  else { document.getElementById("nDay").value=it.day||""; }
+  else {
+    // show the item's day-of-month as a real date in the current month
+    const today=new Date(); const d=clampDay(today.getFullYear(), today.getMonth(), it.day||today.getDate());
+    document.getElementById("nDate").value=iso(d);
+    document.getElementById("nDay").value=it.day||"";
+  }
   document.getElementById("saveItem").textContent="Update";
   document.getElementById("delItem").classList.remove("hide");
   document.getElementById("addFormTitle").textContent="Edit item";
@@ -879,7 +917,7 @@ function openFormModal(){
 }
 function closeForm(){
   editingId=null;
-  document.getElementById("nName").value=""; document.getElementById("nAmt").value=""; document.getElementById("nDay").value=""; document.getElementById("nAnchor").value="";
+  document.getElementById("nName").value=""; document.getElementById("nAmt").value=""; document.getElementById("nDay").value=""; document.getElementById("nAnchor").value=""; document.getElementById("nDate").value="";
   document.getElementById("saveItem").textContent="Save";
   document.getElementById("delItem").classList.add("hide");
   document.getElementById("addFormTitle").textContent="Add item";
@@ -888,10 +926,19 @@ function closeForm(){
 }
 document.getElementById("curBal").addEventListener("input", render);
 document.getElementById("searchBox").addEventListener("input", render);
-document.getElementById("addBtn").onclick=()=>{ if(editingId){ closeForm(); } if(document.getElementById("addForm").classList.contains("open")){ closeForm(); } else { document.getElementById("addFormTitle").textContent="Add item"; openFormModal(); } };
+document.getElementById("addBtn").onclick=()=>{ if(editingId){ closeForm(); } if(document.getElementById("addForm").classList.contains("open")){ closeForm(); } else {
+  document.getElementById("addFormTitle").textContent="Add item";
+  // fresh form defaults: monthly, date picker showing today
+  document.getElementById("nFreq").value="monthly";
+  document.getElementById("nAnchor").classList.add("hide");
+  document.getElementById("nDay").classList.add("hide");
+  document.getElementById("nDate").classList.remove("hide");
+  document.getElementById("nDate").value=iso(new Date());
+  openFormModal();
+} };
 document.getElementById("formScrim").onclick=closeForm;
 document.getElementById("cancelItem").onclick=()=>closeForm();
-document.getElementById("nFreq").addEventListener("change",function(){ const anc=(this.value==="biweekly"||this.value==="weekly"); document.getElementById("nAnchor").classList.toggle("hide",!anc); document.getElementById("nDay").classList.toggle("hide",anc); });
+document.getElementById("nFreq").addEventListener("change",function(){ const anc=(this.value==="biweekly"||this.value==="weekly"); document.getElementById("nAnchor").classList.toggle("hide",!anc); document.getElementById("nDate").classList.toggle("hide",anc); document.getElementById("nDay").classList.add("hide"); });
 document.getElementById("delItem").onclick=()=>{
   if(editingId && confirm("Delete this item?")){
     snapshot("delete item");
@@ -905,7 +952,12 @@ document.getElementById("saveItem").onclick=()=>{
   const freq=document.getElementById("nFreq").value;
   const fields={ n, a:Math.abs(a), t:document.getElementById("nType").value, freq, account:cur };
   if(freq==="biweekly"||freq==="weekly"){ const anc=document.getElementById("nAnchor").value; if(!anc){document.getElementById("status").textContent=(freq==="weekly"?"Weekly":"Biweekly")+" needs an anchor date."; return;} fields.anchor=anc; fields.day=undefined; }
-  else { fields.day=parseInt(document.getElementById("nDay").value)||new Date().getDate(); fields.anchor=undefined; }
+  else {
+    const dv=document.getElementById("nDate").value;
+    if(dv){ fields.day=parseISO(dv).getDate(); }
+    else { fields.day=parseInt(document.getElementById("nDay").value)||new Date().getDate(); }
+    fields.anchor=undefined;
+  }
   snapshot(editingId?"edit":"add");
   if(editingId){
     const it=state.items.find(x=>x.id===editingId);
@@ -936,7 +988,7 @@ document.getElementById("renameAcctBtn").onclick=()=>{
   state.bal[name]=state.bal[old]; delete state.bal[old];
   state.buffer[name]=state.buffer[old]; delete state.buffer[old];
   state.paid[name]=state.paid[old]||[]; delete state.paid[old];
-  cur=name; save(); buildTabs(); syncBalInput(); render();
+  cur=name; try{localStorage.setItem("cf_curAcct",name);}catch(e){} save(); buildTabs(); syncBalInput(); render();
   document.getElementById("status").textContent="Renamed to "+name+".";
 };
 document.getElementById("delAcctBtn").onclick=()=>{
@@ -951,6 +1003,7 @@ document.getElementById("delAcctBtn").onclick=()=>{
   state.items=state.items.filter(it=>it.account!==gone);
   delete state.bal[gone]; delete state.buffer[gone]; delete state.paid[gone];
   cur=state.accounts[0];
+  try{localStorage.setItem("cf_curAcct",cur);}catch(e){}
   save(); buildTabs(); syncBalInput(); render();
   document.getElementById("status").textContent='Deleted "'+gone+'".';
 };
@@ -998,7 +1051,7 @@ document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState=
 /* ---------------- BOOT ---------------- */
 document.getElementById("verNum").textContent=APP_VERSION;
 load();
-if(state && state.accounts && state.accounts.length){ cur=state.accounts[0]; show("trackerScreen"); buildTabs(); syncBalInput(); render(); }
+if(state && state.accounts && state.accounts.length){ let saved=null; try{saved=localStorage.getItem("cf_curAcct");}catch(e){} cur=(saved && state.accounts.includes(saved))? saved : state.accounts[0]; show("trackerScreen"); buildTabs(); syncBalInput(); render(); }
 else { show("importScreen"); }
 refreshSyncUI();
 initAuth();
