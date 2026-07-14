@@ -82,6 +82,12 @@
   .editbtn:hover{opacity:1; color:var(--accent);}
   .drawerhdr{font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:16px 0 6px; font-weight:600;}
   .draweritem{display:block; width:100%; text-align:left; background:none; border:none; padding:11px 10px; font-size:15px; color:var(--text); cursor:pointer; border-radius:8px;}
+  .odtoggle{display:flex; align-items:center; justify-content:space-between;}
+  .odswitch{width:42px; height:24px; border-radius:12px; background:var(--border); position:relative; transition:background .15s; flex:0 0 auto;}
+  .odswitch.on{background:var(--accent,#2f6df6);}
+  .odknob{position:absolute; top:2px; left:2px; width:20px; height:20px; border-radius:50%; background:#fff; transition:left .15s; box-shadow:0 1px 2px rgba(0,0,0,.3);}
+  .odswitch.on .odknob{left:20px;}
+  .odtoggle.disabled{opacity:.45;}
   .draweritem:hover{background:var(--surface-1);}
   .draweritem.danger{color:var(--red);}
   .horizonopt{flex:1; font-size:13px; padding:8px 4px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--text-2); cursor:pointer;}
@@ -139,7 +145,8 @@
   <p class="drawerhdr">Account</p>
   <button class="draweritem" id="renameAcctBtn">Rename account</button>
   <button class="draweritem" id="delAcctBtn">Delete account</button>
-  <button class="draweritem" id="odDrawerBtn">Overdraft settings</button>
+  <div class="draweritem odtoggle" id="odToggleRow"><span>Overdraft protection</span><span class="odswitch" id="odSwitch"><span class="odknob"></span></span></div>
+  <button class="draweritem" id="odDrawerBtn">Overdraft limit &amp; room…</button>
   <p class="drawerhdr">Data</p>
   <button class="draweritem" id="reimportBtn">Import statements</button>
   <button class="draweritem" id="backupBtn">Back up my data</button>
@@ -154,7 +161,7 @@
   <button class="draweritem" id="feedbackBtn">Send feedback / request a feature</button>
   <p class="drawerhdr">Start over</p>
   <button class="draweritem danger" id="resetBtn">Reset all</button>
-  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v30</span></p>
+  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v31</span></p>
 </nav>
 
 <!-- Sign-in modal -->
@@ -276,7 +283,7 @@ let currentUser=null, syncing=false, autoSyncTimer=null;
 let lastSyncedUpdated=0; // the state.updated value at our last successful push/pull (this device's "clean" marker)
 
 const KEY = "cashflow_multi_v1";
-const APP_VERSION = "v30";
+const APP_VERSION = "v31";
 const DAY = 864e5;
 let horizonDays = (()=>{ const v=parseInt(localStorage.getItem("cf_horizon")); return (v===30||v===60||v===90)? v : 60; })();
 const fmt = (v)=>(v<0?"-":"")+"$"+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -637,7 +644,7 @@ function show(id){ ["importScreen","reviewScreen","trackerScreen"].forEach(s=>do
   document.body.classList.toggle("has-menu", id==="trackerScreen");
   closeDrawer();
 }
-function openDrawer(){ document.getElementById("drawer").style.transform="translateX(0)"; document.getElementById("drawerScrim").classList.remove("hide"); }
+function openDrawer(){ document.getElementById("drawer").style.transform="translateX(0)"; document.getElementById("drawerScrim").classList.remove("hide"); if(typeof refreshOdSwitch==="function") refreshOdSwitch(); }
 function closeDrawer(){ const d=document.getElementById("drawer"); if(d) d.style.transform="translateX(-100%)"; const s=document.getElementById("drawerScrim"); if(s) s.classList.add("hide"); }
 function save(){ try{ if(state) state.updated=Date.now(); localStorage.setItem(KEY, JSON.stringify(state));}catch(e){} scheduleAutoSync(); }
 function load(){ try{const r=localStorage.getItem(KEY); if(r){state=JSON.parse(r);} }catch(e){} }
@@ -1169,32 +1176,47 @@ document.getElementById("buffBtn").onclick=()=>{
   const v=prompt("Safety buffer for "+cur+" — warn when balance would drop below this:", String(state.buffer[cur]||0));
   if(v!==null){ state.buffer[cur]=parseFloat(v)||0; save(); render(); }
 };
+function isOdConfigured(){ const o=state.od&&state.od[cur]; return !!(o && (o.limit>0)); }
+function refreshOdSwitch(){
+  const row=document.getElementById("odToggleRow"); const sw=document.getElementById("odSwitch");
+  if(!row||!sw) return;
+  const o=state.od&&state.od[cur]; const configured=isOdConfigured();
+  row.classList.toggle("disabled", !configured);
+  sw.classList.toggle("on", !!(o&&o.on));
+}
+document.getElementById("odToggleRow").onclick=()=>{
+  if(!state.od) state.od={};
+  if(!isOdConfigured()){
+    // not set up yet -> send them to the setup prompts
+    document.getElementById("odDrawerBtn").click();
+    return;
+  }
+  state.od[cur].on = !state.od[cur].on;
+  refreshOdSwitch(); save(); render();
+  document.getElementById("status").textContent = "Overdraft "+(state.od[cur].on?"on":"off")+" for "+cur+".";
+};
 document.getElementById("odDrawerBtn").onclick=()=>{
   closeDrawer();
   if(!state.od) state.od={};
   const cur0=state.od[cur]||{on:false,limit:0,avail:0,warn:0};
-  const turnOn=confirm("Overdraft protection for "+cur+"\n\nOK = turn ON (enter limit, current available, and a low-room warning level).\nCancel = turn OFF for this account.");
-  if(!turnOn){ state.od[cur]={on:false,limit:cur0.limit||0,avail:cur0.avail||0,warn:cur0.warn||0}; save(); render(); document.getElementById("status").textContent="Overdraft turned off for "+cur+"."; return; }
   const lv=prompt("Overdraft LIMIT for "+cur+" (the total your bank lets you go negative):", String(cur0.limit||0));
   if(lv===null) return;
   const limit=Math.abs(parseFloat(lv)||0);
-  const av=prompt("Current AVAILABLE overdraft room right now (how much you can still draw before hitting the limit):", String(cur0.avail!==undefined?cur0.avail:limit));
+  const av=prompt("Current AVAILABLE overdraft room, BEFORE the items in your list draw it down:", String(cur0.avail!==undefined?cur0.avail:limit));
   if(av===null) return;
   const avail=Math.min(limit, Math.abs(parseFloat(av)||0));
   const wv=prompt("Warn me (amber) when room drops below this amount:", String(cur0.warn||Math.round(limit*0.1)));
   if(wv===null) return;
   const warn=Math.abs(parseFloat(wv)||0);
-  // anchor: the room you enter is your room BEFORE any scheduled items. Anchor it to the
-  // STARTING balance (current balance minus everything already checked off), so room draws
-  // down through all items (paid and unpaid) in order.
+  // anchor: room entered is BEFORE any scheduled items. Anchor to the starting balance
+  // (current balance minus everything already checked off) so room draws down through all items.
   const curBalNow=parseFloat(document.getElementById("curBal").value)||0;
-  const paidItems=state.items.filter(it=>it.account===cur);
   const paidSet=new Set(state.paid[cur]||[]);
-  const schedNow=buildSchedule(paidItems);
+  const schedNow=buildSchedule(state.items.filter(it=>it.account===cur));
   const paidDelta=schedNow.reduce((s,o)=> s + (paidSet.has(o.key)? (o.t==="in"?o.a:-o.a):0), 0);
   const anchorBal=curBalNow - paidDelta;
   state.od[cur]={on:true, limit, avail, warn, anchorBal};
-  save(); render();
+  save(); render(); refreshOdSwitch();
   document.getElementById("status").textContent="Overdraft on for "+cur+": "+fmt0(avail)+" room of "+fmt0(limit)+", warn under "+fmt0(warn)+".";
 };
 document.getElementById("renameAcctBtn").onclick=()=>{
