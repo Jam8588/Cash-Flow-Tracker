@@ -154,7 +154,7 @@
   <button class="draweritem" id="feedbackBtn">Send feedback / request a feature</button>
   <p class="drawerhdr">Start over</p>
   <button class="draweritem danger" id="resetBtn">Reset all</button>
-  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v27</span></p>
+  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v28</span></p>
 </nav>
 
 <!-- Sign-in modal -->
@@ -276,7 +276,7 @@ let currentUser=null, syncing=false, autoSyncTimer=null;
 let lastSyncedUpdated=0; // the state.updated value at our last successful push/pull (this device's "clean" marker)
 
 const KEY = "cashflow_multi_v1";
-const APP_VERSION = "v27";
+const APP_VERSION = "v28";
 const DAY = 864e5;
 let horizonDays = (()=>{ const v=parseInt(localStorage.getItem("cf_horizon")); return (v===30||v===60||v===90)? v : 60; })();
 const fmt = (v)=>(v<0?"-":"")+"$"+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -1001,8 +1001,20 @@ function render(){
     b.onclick=()=>{
       const it=state.items.find(x=>x.id===b.dataset.id); if(!it)return;
       const pset=new Set(state.paid[cur]||[]); const key=b.dataset.key;
-      if(pset.has(key)){ pset.delete(key); state.bal[cur]=(parseFloat(document.getElementById("curBal").value)||0)-(it.t==="in"?it.a:-it.a); }
-      else { pset.add(key); state.bal[cur]=(parseFloat(document.getElementById("curBal").value)||0)+(it.t==="in"?it.a:-it.a); }
+      const delta=(it.t==="in"?it.a:-it.a); // effect on balance/room when marking paid
+      const curBalNow=parseFloat(document.getElementById("curBal").value)||0;
+      const odc=(state.od&&state.od[cur]&&state.od[cur].on)?state.od[cur]:null;
+      if(pset.has(key)){
+        // UN-check: reverse it
+        pset.delete(key);
+        state.bal[cur]=curBalNow-delta;
+        if(odc){ odc.avail=Math.min(odc.limit, (+odc.avail||0)-delta); }
+      } else {
+        // check as paid: apply it to balance AND overdraft room
+        pset.add(key);
+        state.bal[cur]=curBalNow+delta;
+        if(odc){ odc.avail=Math.min(odc.limit, (+odc.avail||0)+delta); }
+      }
       state.paid[cur]=[...pset]; document.getElementById("curBal").value=state.bal[cur].toFixed(2); save(); render();
     };
   });
