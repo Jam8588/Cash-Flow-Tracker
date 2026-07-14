@@ -152,7 +152,7 @@
   <button class="draweritem" id="feedbackBtn">Send feedback / request a feature</button>
   <p class="drawerhdr">Start over</p>
   <button class="draweritem danger" id="resetBtn">Reset all</button>
-  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v23</span></p>
+  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v24</span></p>
 </nav>
 
 <!-- Sign-in modal -->
@@ -273,7 +273,7 @@ let currentUser=null, syncing=false, autoSyncTimer=null;
 let lastSyncedUpdated=0; // the state.updated value at our last successful push/pull (this device's "clean" marker)
 
 const KEY = "cashflow_multi_v1";
-const APP_VERSION = "v23";
+const APP_VERSION = "v24";
 const DAY = 864e5;
 let horizonDays = (()=>{ const v=parseInt(localStorage.getItem("cf_horizon")); return (v===30||v===60||v===90)? v : 60; })();
 const fmt = (v)=>(v<0?"-":"")+"$"+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -385,25 +385,88 @@ async function parsePDF(file){
   if(!window.pdfjsLib) return [];
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-  let lines=[];
+  const out=[];
+  const numRe=/^-?\$?[\d,]+\.\d{2}$/;
+  const monthAbbr="jan feb mar apr may jun jul aug sep oct nov dec";
+  const dedupeDoubled=(s)=>{ // "0011JJuunn" -> "01Jun"
+    if(s.length<6) return s;
+    let allPairs=true; for(let i=0;i<s.length-1;i+=2){ if(s[i]!==s[i+1]){allPairs=false;break;} }
+    if(!allPairs) return s;
+    let o=""; for(let i=0;i<s.length;i+=2) o+=s[i]; return o;
+  };
+  const parseTxDate=(tok)=>{ // "23May" or "0011JJuunn"
+    let t=tok.replace(/\s/g,"");
+    let m=t.match(/^(\d{1,2})([A-Za-z]{3})$/);
+    if(!m){ const d=dedupeDoubled(t); m=d.match(/^(\d{1,2})([A-Za-z]{3})$/); }
+    if(!m) return null;
+    const mo=monthAbbr.indexOf(m[2].toLowerCase())/4;
+    if(mo<0 || !Number.isInteger(mo)) return null;
+    return {day:+m[1], mo};
+  };
+
   for(let p=1;p<=pdf.numPages;p++){
     const page=await pdf.getPage(p); const tc=await page.getTextContent();
-    const byY={};
-    tc.items.forEach(it=>{ const y=Math.round(it.transform[5]); (byY[y]=byY[y]||[]).push(it.str); });
-    Object.keys(byY).sort((a,b)=>b-a).forEach(y=> lines.push(byY[y].join(" ")));
+    // Build words with x (transform[4]) and y (transform[5]); x1 = x + width
+    const items=tc.items.filter(it=>it.str && it.str.trim()!=="").map(it=>({
+      str:it.str.trim(), x:it.transform[4], x1:it.transform[4]+(it.width||0), y:Math.round(it.transform[5])
+    }));
+    if(!items.length) continue;
+    // group into lines by y
+    const lineMap={};
+    items.forEach(it=>{ (lineMap[it.y]=lineMap[it.y]||[]).push(it); });
+    const ys=Object.keys(lineMap).map(Number).sort((a,b)=>b-a); // top to bottom
+
+    // find the numeric-column x positions on THIS page
+    const numXs=[];
+    ys.forEach(y=> lineMap[y].forEach(it=>{ if(numRe.test(it.str)) numXs.push(it.x1); }));
+    if(numXs.length<3) continue;
+    numXs.sort((a,b)=>a-b);
+    // bucket to columns (nearest 15pt), take the 3 rightmost as debit/credit/balance
+    const buckets={};
+    numXs.forEach(x=>{ const b=Math.round(x/15)*15; buckets[b]=(buckets[b]||0)+1; });
+    const colXs=Object.keys(buckets).map(Number).sort((a,b)=>a-b);
+    const top3=colXs.slice(-3);
+    if(top3.length<3) continue;
+    const debitX=top3[0], creditX=top3[1], balX=top3[2];
+
+    let curYear=null;
+    // try to read statement year from any "to Month DD, YYYY" text
+    ys.forEach(y=>{ const t=lineMap[y].map(w=>w.str).join(" "); const my=t.match(/(\d{4})/); if(my && !curYear && +my[1]>2000 && +my[1]<2100) {} });
+    // simpler: scan all text for a 4-digit year near "to"
+    const allText=items.map(i=>i.str).join(" ");
+    const ym=allText.match(/to\s+[A-Za-z]+\s+\d{1,2},?\s*(\d{4})/) || allText.match(/(\d{4})/);
+    curYear = ym? +ym[1] : new Date().getFullYear();
+
+    let curDate=null;
+    ys.forEach(y=>{
+      const row=lineMap[y].slice().sort((a,b)=>a.x-b.x);
+      const rowText=row.map(w=>w.str).join(" ");
+      // update running date if this row starts with one
+      for(const w of row){ const d=parseTxDate(w.str); if(d){ curDate=d; break; } }
+      // classify numbers
+      let debit=null, credit=null; const descTokens=[];
+      row.forEach(w=>{
+        if(numRe.test(w.str)){
+          const val=parseFloat(w.str.replace(/[,$]/g,""));
+          const dd=Math.abs(w.x1-debitX), dc=Math.abs(w.x1-creditX), db=Math.abs(w.x1-balX);
+          if(db<=dd && db<=dc){ /* balance: ignore */ }
+          else if(dd<=dc){ debit=val; }
+          else { credit=val; }
+        } else if(!parseTxDate(w.str)){
+          descTokens.push(w.str);
+        }
+      });
+      if(debit===null && credit===null) return;
+      let desc=descTokens.join(" ").replace(/\s+/g," ").trim();
+      const dcheck=desc.toLowerCase().replace(/\s+/g,"");
+      if(/openingbalance|closingbalance|totaldeposits|totalcheques|accountfees|balance\(\$\)/.test(dcheck)) return;
+      if(!desc) desc="Transaction";
+      const amt = credit!==null ? Math.abs(credit) : -Math.abs(debit);
+      if(!amt || !curDate) return;
+      const dt=new Date(curYear, curDate.mo, curDate.day);
+      out.push({date:dt, desc:desc.slice(0,48), amt});
+    });
   }
-  const out=[];
-  const amtRe=/(-?\$?\s?\d{1,3}(?:,\d{3})*\.\d{2})/g;
-  lines.forEach(line=>{
-    const dt=parseDate(line.slice(0,18));
-    if(!dt) return;
-    const amts=line.match(amtRe); if(!amts) return;
-    const amt=num(amts[amts.length-1]);
-    if(!amt) return;
-    const desc=line.replace(amtRe,"").replace(/^\s*[\d\/\-\.a-z, ]{6,18}/i,"").trim().slice(0,40) || "Transaction";
-    const isCredit=/deposit|payroll|credit|received|refund|paid in/i.test(line);
-    out.push({date:dt, desc, amt: isCredit? Math.abs(amt) : -Math.abs(amt)});
-  });
   return out;
 }
 
@@ -482,7 +545,13 @@ function detectRecurring(files){
   return rows;
 }
 function cleanName(d){
-  return d.replace(/\s{2,}/g," ").replace(/[#*].*$/,"").trim().replace(/\b\w/g,c=>c.toUpperCase()).slice(0,28);
+  let s=d.replace(/\s{2,}/g," ").trim();
+  // insert spaces at camelCase / letter-number run-togethers from PDF extraction
+  s=s.replace(/([a-z])([A-Z])/g,"$1 $2").replace(/([A-Za-z])(\d)/g,"$1 $2").replace(/(\d)([A-Za-z])/g,"$1 $2");
+  s=s.replace(/[#*].*$/,"").replace(/\s{2,}/g," ").trim();
+  // strip trailing store/ref codes like "B001", "- 9148"
+  s=s.replace(/\s*-\s*\d{3,}\s*[A-Z]?\d*$/,"").replace(/\bB0\d{2}\b/g,"").trim();
+  return s.replace(/\b\w/g,c=>c.toUpperCase()).slice(0,32);
 }
 
 /* ---------------- REVIEW TABLE ---------------- */
