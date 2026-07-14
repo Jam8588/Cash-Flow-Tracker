@@ -152,7 +152,7 @@
   <button class="draweritem" id="feedbackBtn">Send feedback / request a feature</button>
   <p class="drawerhdr">Start over</p>
   <button class="draweritem danger" id="resetBtn">Reset all</button>
-  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v24</span></p>
+  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v25</span></p>
 </nav>
 
 <!-- Sign-in modal -->
@@ -224,10 +224,12 @@
       </div>
       <div class="card"><p class="lbl">After next payment</p><p class="big" id="afterNext">—</p><p class="cnote" id="afterNextLbl"></p></div>
       <div class="card"><p class="lbl">Lowest point ahead</p><p class="big" id="lowPoint">—</p><p class="cnote" id="lowPointLbl"></p></div>
+      <div class="card hide" id="odCard"><p class="lbl">Overdraft room</p><p class="big" id="odRemain">—</p><p class="cnote" id="odNote"></p></div>
     </div>
     <div class="btnrow">
       <button class="btn" id="addBtn">+ Add item</button>
       <button class="btn" id="buffBtn">Set buffer</button>
+      <button class="btn" id="odBtn">Overdraft</button>
       <button class="btn hide" id="undoBtn">↶ Undo</button>
       <input type="file" id="restoreFile" accept=".json,application/json" class="hide" />
     </div>
@@ -273,7 +275,7 @@ let currentUser=null, syncing=false, autoSyncTimer=null;
 let lastSyncedUpdated=0; // the state.updated value at our last successful push/pull (this device's "clean" marker)
 
 const KEY = "cashflow_multi_v1";
-const APP_VERSION = "v24";
+const APP_VERSION = "v25";
 const DAY = 864e5;
 let horizonDays = (()=>{ const v=parseInt(localStorage.getItem("cf_horizon")); return (v===30||v===60||v===90)? v : 60; })();
 const fmt = (v)=>(v<0?"-":"")+"$"+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -602,7 +604,8 @@ document.getElementById("populateBtn").onclick=()=>{
   const chosen=detected.filter(r=>r.use);
   const accts=[...new Set(chosen.map(r=>r.account))];
   if(!accts.length){ document.getElementById("reviewStatus").textContent="Tick at least one item, or go back and set up manually."; return; }
-  if(!state || !state.accounts){ state={accounts:[], items:[], bal:{}, buffer:{}, paid:{}}; }
+  if(!state || !state.accounts){ state={accounts:[], items:[], bal:{}, buffer:{}, paid:{}, od:{}}; }
+  if(!state.od) state.od={};
   accts.forEach(a=>{
     if(!state.accounts.includes(a)) state.accounts.push(a);
     if(state.bal[a]===undefined) state.bal[a]=0;
@@ -683,7 +686,7 @@ function restoreData(file){
       snapshot("restore");
       state=data;
       state.bal=state.bal||{}; state.buffer=state.buffer||{}; state.paid=state.paid||{};
-      state.accounts.forEach(a=>{ if(state.bal[a]===undefined)state.bal[a]=0; if(state.buffer[a]===undefined)state.buffer[a]=0; if(!state.paid[a])state.paid[a]=[]; });
+      if(!state.od) state.od={}; state.accounts.forEach(a=>{ if(state.bal[a]===undefined)state.bal[a]=0; if(state.buffer[a]===undefined)state.buffer[a]=0; if(!state.paid[a])state.paid[a]=[]; });
       cur=state.accounts[0];
       save();
       if(state.accounts.length){ show("trackerScreen"); buildTabs(); syncBalInput(); render(); }
@@ -776,7 +779,7 @@ async function pullFromCloud(opts){
 function applyCloud(cloud){
   state=cloud;
   state.bal=state.bal||{}; state.buffer=state.buffer||{}; state.paid=state.paid||{}; state.items=state.items||[]; state.accounts=state.accounts||[];
-  state.accounts.forEach(a=>{ if(state.bal[a]===undefined)state.bal[a]=0; if(state.buffer[a]===undefined)state.buffer[a]=0; if(!state.paid[a])state.paid[a]=[]; });
+  if(!state.od) state.od={}; state.accounts.forEach(a=>{ if(state.bal[a]===undefined)state.bal[a]=0; if(state.buffer[a]===undefined)state.buffer[a]=0; if(!state.paid[a])state.paid[a]=[]; });
   try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){}
   lastSyncedUpdated = state.updated || Date.now(); // loaded cloud = this device is clean/in-sync
   let saved=null; try{saved=localStorage.getItem("cf_curAcct");}catch(e){}
@@ -859,6 +862,7 @@ function buildTabs(){
   });
 }
 function syncBalInput(){ document.getElementById("curBal").value=(state.bal[cur]||0).toFixed(2); document.getElementById("curLbl").textContent=cur+" balance"; }
+function odFor(acct){ const o=(state.od&&state.od[acct])?state.od[acct]:null; return (o&&o.on)? {on:true, limit:+o.limit||0, avail:(o.avail!==undefined?+o.avail:(+o.limit||0))} : {on:false, limit:0, avail:0}; }
 
 function occurrencesFor(it, today, horizon, back){
   // Earliest date we include. `back` gives the 40-day lookback for keeping missed items
@@ -895,18 +899,33 @@ function render(){
   if(!state) return;
   state.bal[cur]=parseFloat(document.getElementById("curBal").value)||0;
   const buffer=state.buffer[cur]||0; const paid=new Set(state.paid[cur]||[]);
+  const od=odFor(cur);
   const items=state.items.filter(it=>it.account===cur);
   const sched=buildSchedule(items);
   const query=(document.getElementById("searchBox").value||"").trim().toLowerCase();
   let bal=state.bal[cur], low=bal, lowDate=null, firstAfter=null, firstName="";
   let html=""; let overdueHtml=""; let lastMonth="";
+  // classify a running balance into ok / warn / neg given overdraft + buffer
+  const classify=(b)=>{
+    if(od.on){
+      if(b < -od.limit) return "neg";        // past overdraft limit = red
+      if(b < 0) return "warn";               // into overdraft but covered = amber
+      if(buffer && b < buffer) return "warn"; // above zero but under buffer = amber
+      return "ok";
+    } else {
+      if(b < 0) return "neg";
+      if(buffer && b < buffer) return "warn";
+      return "ok";
+    }
+  };
   sched.forEach(o=>{
     const isPaid=paid.has(o.key);
     if(!isPaid){ bal+=(o.t==="in"?o.a:-o.a); if(firstAfter===null){firstAfter=bal;firstName=o.n;} if(bal<low){low=bal;lowDate=o.date;} }
     if(query && !o.n.toLowerCase().includes(query)) return;
-    const isIn=o.t==="in"; const short=(!isPaid)&&bal<buffer;
-    const balCls=isPaid?"paid":(bal<0?"neg":(short?"warn":"ok"));
-    const balTxt=isPaid?"paid":(fmt0(bal)+(bal<0?" !":(short?" *":"")));
+    const isIn=o.t==="in";
+    const balCls=isPaid?"paid":classify(bal);
+    const flag = balCls==="neg" ? " !" : (balCls==="warn" ? " *" : "");
+    const balTxt=isPaid?"paid":(fmt0(bal)+flag);
     const dstr=o.date.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"});
     if(o.overdue && !isPaid){
       overdueHtml+='<div class="row overdue">'+
@@ -928,12 +947,45 @@ function render(){
   const bodyHtml=overdueHtml+html;
   document.getElementById("rows").innerHTML = bodyHtml || '<p style="color:var(--muted); font-size:14px; padding:12px 0;">'+(query?'No transactions match "'+query+'".':'No upcoming items for this account.')+'</p>';
   renderMonthSummary(paid);
+  const colorFor=(cls)=> cls==="neg"?"var(--red)":(cls==="warn"?"var(--amber)":"var(--text)");
   const af=document.getElementById("afterNext"); af.textContent=firstAfter===null?"—":fmt0(firstAfter);
-  af.style.color=firstAfter===null?"var(--text)":(firstAfter<0?"var(--red)":(firstAfter<buffer?"var(--amber)":"var(--text)"));
+  af.style.color=firstAfter===null?"var(--text)":colorFor(classify(firstAfter));
   document.getElementById("afterNextLbl").textContent=firstName?("after "+firstName):"all upcoming paid";
   const lp=document.getElementById("lowPoint"); lp.textContent=fmt0(low);
-  lp.style.color=low<0?"var(--red)":(low<buffer?"var(--amber)":"var(--text)");
-  document.getElementById("lowPointLbl").textContent=lowDate?("on "+lowDate.toLocaleDateString(undefined,{month:"short",day:"numeric"})+(low<buffer?(low<0?" — overdraft!":" — below buffer"):"")):("next "+horizonDays+" days");
+  const lowCls=classify(low);
+  lp.style.color=colorFor(lowCls);
+  let lowNote;
+  if(!lowDate){ lowNote="next "+horizonDays+" days"; }
+  else {
+    const on="on "+lowDate.toLocaleDateString(undefined,{month:"short",day:"numeric"});
+    if(od.on){
+      if(low < -od.limit) lowNote=on+" — exceeds overdraft by "+fmt0(Math.abs(low)-od.limit)+"!";
+      else if(low < 0) lowNote=on+" — in overdraft ("+fmt0(od.limit-Math.abs(low))+" room left)";
+      else if(buffer && low<buffer) lowNote=on+" — below buffer";
+      else lowNote=on;
+    } else {
+      lowNote=on+(low<0?" — overdraft!":(buffer&&low<buffer?" — below buffer":""));
+    }
+  }
+  document.getElementById("lowPointLbl").textContent=lowNote;
+  // Overdraft card
+  const odCard=document.getElementById("odCard");
+  if(od.on){
+    odCard.classList.remove("hide");
+    // Overdraft used at the lowest projected point = how far the running balance drops below zero.
+    const usedAtLow = low<0 ? Math.abs(low) : 0;
+    const remainAtLow = od.limit - usedAtLow; // projected room left at the worst point ahead
+    const odRemain=document.getElementById("odRemain");
+    odRemain.textContent = (remainAtLow<0? "-"+fmt0(Math.abs(remainAtLow)) : fmt0(remainAtLow));
+    odRemain.style.color = remainAtLow<0 ? "var(--red)" : (usedAtLow>0 ? "var(--amber)" : "var(--green)");
+    let note;
+    if(remainAtLow<0) note="OVER by "+fmt0(Math.abs(remainAtLow))+" at lowest point";
+    else if(usedAtLow>0) note="left at lowest point ("+fmt0(usedAtLow)+" into overdraft)";
+    else note="untouched • "+fmt0(od.avail)+" available now";
+    document.getElementById("odNote").textContent=note;
+  } else {
+    odCard.classList.add("hide");
+  }
   document.querySelectorAll(".chk").forEach(b=>{
     b.onclick=()=>{
       const it=state.items.find(x=>x.id===b.dataset.id); if(!it)return;
@@ -1093,6 +1145,21 @@ document.getElementById("saveItem").onclick=()=>{
 document.getElementById("buffBtn").onclick=()=>{
   const v=prompt("Safety buffer for "+cur+" — warn when balance would drop below this:", String(state.buffer[cur]||0));
   if(v!==null){ state.buffer[cur]=parseFloat(v)||0; save(); render(); }
+};
+document.getElementById("odBtn").onclick=()=>{
+  if(!state.od) state.od={};
+  const cur0=state.od[cur]||{on:false,limit:0,avail:0};
+  const turnOn=confirm("Overdraft protection for "+cur+"\n\nOK = turn ON (you'll enter your limit and current available).\nCancel = turn OFF for this account.");
+  if(!turnOn){ state.od[cur]={on:false,limit:cur0.limit||0,avail:cur0.avail||0}; save(); render(); document.getElementById("status").textContent="Overdraft turned off for "+cur+"."; return; }
+  const lv=prompt("Overdraft LIMIT for "+cur+" (the total your bank lets you go negative):", String(cur0.limit||0));
+  if(lv===null) return;
+  const limit=Math.abs(parseFloat(lv)||0);
+  const av=prompt("Current AVAILABLE overdraft room right now (how much of the "+fmt0(limit)+" is still usable):", String(cur0.avail!==undefined?cur0.avail:limit));
+  if(av===null) return;
+  const avail=Math.abs(parseFloat(av)||0);
+  state.od[cur]={on:true, limit, avail};
+  save(); render();
+  document.getElementById("status").textContent="Overdraft on for "+cur+": "+fmt0(avail)+" of "+fmt0(limit)+" available.";
 };
 document.getElementById("renameAcctBtn").onclick=()=>{
   closeDrawer();
