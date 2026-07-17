@@ -67,6 +67,9 @@
   .card input:focus{outline:none;}
   .btnrow{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px;}
   .monthhdr{font-size:12px; color:var(--muted); font-weight:600; margin:16px 0 6px;}
+  .paidhdr{display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; color:var(--muted); background:var(--surface,#f2efe9); border-radius:8px; padding:9px 11px; margin:6px 0; cursor:pointer;}
+  .paidchev{font-size:11px; width:12px;}
+  .paidhint{margin-left:auto; font-size:11px; font-weight:500; opacity:.7;}
   .row{display:grid; grid-template-columns:auto 1fr auto auto; gap:10px; align-items:center;
     padding:9px 4px; border-bottom:1px solid var(--border);}
   .row.paid{opacity:.6;}
@@ -161,7 +164,7 @@
   <button class="draweritem" id="feedbackBtn">Send feedback / request a feature</button>
   <p class="drawerhdr">Start over</p>
   <button class="draweritem danger" id="resetBtn">Reset all</button>
-  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v31</span></p>
+  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v32</span></p>
 </nav>
 
 <!-- Sign-in modal -->
@@ -283,9 +286,10 @@ let currentUser=null, syncing=false, autoSyncTimer=null;
 let lastSyncedUpdated=0; // the state.updated value at our last successful push/pull (this device's "clean" marker)
 
 const KEY = "cashflow_multi_v1";
-const APP_VERSION = "v31";
+const APP_VERSION = "v32";
 const DAY = 864e5;
 let horizonDays = (()=>{ const v=parseInt(localStorage.getItem("cf_horizon")); return (v===30||v===60||v===90)? v : 60; })();
+let paidCollapsed = (localStorage.getItem("cf_paidCollapsed")!=="0"); // default: collapsed/hidden
 const fmt = (v)=>(v<0?"-":"")+"$"+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmt0 = (v)=>(v<0?"-":"")+"$"+Math.abs(Math.round(v)).toLocaleString();
 const clampDay=(y,m,d)=>{const last=new Date(y,m+1,0).getDate();return new Date(y,m,Math.min(d,last));};
@@ -922,7 +926,7 @@ function render(){
   // Room derives from the running balance via the anchor (set to the starting balance at setup),
   // so balance and room never drift, and paid items still count against room.
   let lowRoom = od.on ? roomAt(od, runBal) : 0, firstRoom = null;
-  let html=""; let overdueHtml=""; let lastMonth="";
+  let html=""; let overdueHtml=""; let paidHtml=""; let paidCount=0; let lastMonth="";
   const classifyRoom=(r)=>{
     if(r <= 0) return "neg";                       // room gone = over the limit
     if(od.warn ? r < od.warn : r < od.limit*0.1) return "warn"; // getting low
@@ -964,15 +968,31 @@ function render(){
       return;
     }
     const mo=o.date.toLocaleDateString(undefined,{month:"long",year:"numeric"});
-    if(mo!==lastMonth){ html+='<div class="monthhdr">'+mo+'</div>'; lastMonth=mo; }
-    html+='<div class="row '+(isPaid?'paid':'')+'">'+
+    const rowHtml='<div class="row '+(isPaid?'paid':'')+'">'+
       '<button class="chk '+(isPaid?'on':'')+'" data-key="'+o.key+'" data-id="'+o.id+'">✓</button>'+
       '<div style="min-width:0;"><div style="display:flex; align-items:center; gap:2px;"><span class="nm '+(isPaid?'paid':'')+'">'+o.n+'</span><button class="editbtn" data-edit="'+o.id+'" title="Edit">✎</button></div><div class="dt">'+dstr+'</div></div>'+
       '<div class="amt '+(isPaid?'muted':(isIn?'in':'out'))+'">'+(isIn?"+":"−")+fmt(o.a)+'</div>'+
       '<div class="bal '+cls+'">'+balTxt+'</div></div>';
+    if(isPaid){
+      paidCount++;
+      paidHtml+=rowHtml;   // paid rows go into the collapsible history group (no month headers)
+    } else {
+      if(mo!==lastMonth){ html+='<div class="monthhdr">'+mo+'</div>'; lastMonth=mo; }
+      html+=rowHtml;
+    }
   });
   if(overdueHtml){ overdueHtml='<div class="monthhdr" style="color:var(--amber);">Overdue / not yet cleared</div>'+overdueHtml; }
-  const bodyHtml=overdueHtml+html;
+  // Collapsible paid/historical section
+  let paidSection="";
+  if(paidCount>0){
+    const open=!paidCollapsed;
+    paidSection='<div class="paidhdr" id="paidHdr">'+
+      '<span class="paidchev">'+(open?"▾":"▸")+'</span>'+
+      '<span>'+paidCount+' paid / cleared</span>'+
+      '<span class="paidhint">'+(open?"tap to hide":"tap to show")+'</span></div>'+
+      '<div id="paidWrap" class="'+(open?"":"hide")+'">'+paidHtml+'</div>';
+  }
+  const bodyHtml=overdueHtml+paidSection+html;
   document.getElementById("rows").innerHTML = bodyHtml || '<p style="color:var(--muted); font-size:14px; padding:12px 0;">'+(query?'No transactions match "'+query+'".':'No upcoming items for this account.')+'</p>';
   renderMonthSummary(paid);
   const colorFor=(cls)=> cls==="neg"?"var(--red)":(cls==="warn"?"var(--amber)":"var(--text)");
@@ -1026,6 +1046,8 @@ function render(){
     };
   });
   document.querySelectorAll(".editbtn").forEach(b=>{ b.onclick=()=>openEdit(b.dataset.edit); });
+  const paidHdr=document.getElementById("paidHdr");
+  if(paidHdr){ paidHdr.onclick=()=>{ paidCollapsed=!paidCollapsed; localStorage.setItem("cf_paidCollapsed", paidCollapsed?"1":"0"); render(); }; }
   document.querySelectorAll(".dismissbtn").forEach(b=>{
     b.onclick=()=>{
       const key=b.dataset.dismiss;
