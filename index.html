@@ -141,7 +141,8 @@
     <button id="drawerClose" aria-label="Close" style="background:none; border:none; font-size:22px; cursor:pointer; color:var(--muted); line-height:1;">×</button>
   </div>
   <p class="drawerhdr">Sync</p>
-  <p id="syncStatus" style="font-size:12px; color:var(--muted); padding:2px 10px; margin:0 0 4px;">Not signed in</p>
+  <p id="syncStatus" style="font-size:12px; color:var(--muted); padding:2px 10px; margin:0 0 2px;">Not signed in</p>
+  <p id="lastSyncLine" style="font-size:11px; color:var(--muted); padding:0 10px; margin:0 0 4px; opacity:.8;"></p>
   <button class="draweritem" id="signInBtn">Sign in to sync</button>
   <button class="draweritem hide" id="syncNowBtn">Sync now</button>
   <button class="draweritem hide" id="signOutBtn">Sign out</button>
@@ -164,7 +165,7 @@
   <button class="draweritem" id="feedbackBtn">Send feedback / request a feature</button>
   <p class="drawerhdr">Start over</p>
   <button class="draweritem danger" id="resetBtn">Reset all</button>
-  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v32</span></p>
+  <p style="margin-top:22px; padding-top:14px; border-top:1px solid var(--border); font-size:11px; color:var(--muted);">Cash Flow Tracker <span id="verNum">v36</span></p>
 </nav>
 
 <!-- Sign-in modal -->
@@ -283,10 +284,11 @@ const CLOUD_ROW_ID="household";
 let sb=null;
 try{ if(window.supabase&&window.supabase.createClient){ sb=window.supabase.createClient(SB_URL, SB_KEY); } }catch(e){ console.log("supabase init failed",e); }
 let currentUser=null, syncing=false, autoSyncTimer=null;
+let cloudChecked=false; // becomes true after the first cloud check post sign-in; blocks any push before then
 let lastSyncedUpdated=0; // the state.updated value at our last successful push/pull (this device's "clean" marker)
 
 const KEY = "cashflow_multi_v1";
-const APP_VERSION = "v32";
+const APP_VERSION = "v36";
 const DAY = 864e5;
 let horizonDays = (()=>{ const v=parseInt(localStorage.getItem("cf_horizon")); return (v===30||v===60||v===90)? v : 60; })();
 let paidCollapsed = (localStorage.getItem("cf_paidCollapsed")!=="0"); // default: collapsed/hidden
@@ -648,10 +650,26 @@ function show(id){ ["importScreen","reviewScreen","trackerScreen"].forEach(s=>do
   document.body.classList.toggle("has-menu", id==="trackerScreen");
   closeDrawer();
 }
-function openDrawer(){ document.getElementById("drawer").style.transform="translateX(0)"; document.getElementById("drawerScrim").classList.remove("hide"); if(typeof refreshOdSwitch==="function") refreshOdSwitch(); }
+function openDrawer(){ document.getElementById("drawer").style.transform="translateX(0)"; document.getElementById("drawerScrim").classList.remove("hide"); if(typeof refreshOdSwitch==="function") refreshOdSwitch(); if(typeof renderLastSync==="function") renderLastSync(); }
 function closeDrawer(){ const d=document.getElementById("drawer"); if(d) d.style.transform="translateX(-100%)"; const s=document.getElementById("drawerScrim"); if(s) s.classList.add("hide"); }
-function save(){ try{ if(state) state.updated=Date.now(); localStorage.setItem(KEY, JSON.stringify(state));}catch(e){} scheduleAutoSync(); }
-function load(){ try{const r=localStorage.getItem(KEY); if(r){state=JSON.parse(r);} }catch(e){} }
+function save(){
+  try{
+    if(state) state.updated=Date.now();
+    const json=JSON.stringify(state);
+    localStorage.setItem(KEY, json);
+    // keep a rescue copy, but only when there's real data (never overwrite a good rescue with empty)
+    if(state && state.accounts && state.accounts.length){ try{ localStorage.setItem(KEY+"_rescue", json); }catch(e){} }
+  }catch(e){}
+  scheduleAutoSync();
+}
+function load(){
+  let ok=false;
+  try{ const r=localStorage.getItem(KEY); if(r){ state=JSON.parse(r); ok=!!(state); } }catch(e){}
+  // Rescue net: if the main copy is missing or unreadable, fall back to the last rescue copy.
+  if(!ok || !state || !state.accounts){
+    try{ const bak=localStorage.getItem(KEY+"_rescue"); if(bak){ const r2=JSON.parse(bak); if(r2 && r2.accounts && r2.accounts.length){ state=r2; try{localStorage.setItem(KEY, bak);}catch(e){} } } }catch(e){}
+  }
+}
 
 /* ---------------- UNDO (one step) ---------------- */
 let undoSnapshot=null, undoLabel="";
@@ -709,6 +727,30 @@ function restoreData(file){
 }
 
 /* ---------------- CLOUD SYNC ---------------- */
+let lastSyncAt = (()=>{ const v=parseInt(localStorage.getItem("cf_lastSyncAt")); return v||0; })();
+function markSynced(dir){ // dir: "up" (pushed) or "down" (pulled)
+  lastSyncAt=Date.now();
+  try{ localStorage.setItem("cf_lastSyncAt", String(lastSyncAt)); localStorage.setItem("cf_lastSyncDir", dir||""); }catch(e){}
+  renderLastSync();
+}
+function relTime(ts){
+  if(!ts) return "";
+  const s=Math.floor((Date.now()-ts)/1000);
+  if(s<10) return "just now";
+  if(s<60) return s+" sec ago";
+  const m=Math.floor(s/60); if(m<60) return m+" min ago";
+  const h=Math.floor(m/60); if(h<24) return h+" hr ago";
+  const d=Math.floor(h/24); if(d<7) return d+" day"+(d>1?"s":"")+" ago";
+  return new Date(ts).toLocaleDateString();
+}
+function renderLastSync(){
+  const el=document.getElementById("lastSyncLine"); if(!el) return;
+  if(!currentUser){ el.textContent=""; return; }
+  if(!lastSyncAt){ el.textContent="Not synced yet this device"; return; }
+  const dir=localStorage.getItem("cf_lastSyncDir");
+  const word = dir==="down" ? "Updated from cloud" : (dir==="up" ? "Saved to cloud" : "Last synced");
+  el.textContent = word+" "+relTime(lastSyncAt)+" ("+new Date(lastSyncAt).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})+")";
+}
 function setSyncStatus(txt, color){
   const el=document.getElementById("syncStatus"); if(!el) return;
   el.innerHTML = (color? '<span class="syncdot" style="background:'+color+'"></span>':'') + txt;
@@ -720,22 +762,32 @@ function refreshSyncUI(){
   document.getElementById("signOutBtn").classList.toggle("hide", !signedIn);
   if(signedIn){ setSyncStatus("Signed in as "+currentUser.email, "var(--green)"); }
   else { setSyncStatus("Not signed in (this device only)", "var(--muted)"); }
+  renderLastSync();
 }
 function scheduleAutoSync(){
   if(!currentUser||!sb) return;
+  if(!cloudChecked) return; // never auto-push before we've checked the cloud (protects new devices)
   clearTimeout(autoSyncTimer);
-  autoSyncTimer=setTimeout(()=>{ pushToCloud(true); }, 2500);
+  autoSyncTimer=setTimeout(()=>{ pushToCloud(true); }, 900);
 }
-async function pushToCloud(quiet){
+function localHasUnsynced(){ return !!(state && (state.updated||0) > lastSyncedUpdated); }
+async function pushToCloud(quiet, force){
   if(!currentUser||!sb||!state) return;
+  if(!cloudChecked && !force) return; // don't push before the first cloud check (new-device safety)
   if(syncing) return;
   syncing=true;
+  clearTimeout(autoSyncTimer); // cancel any pending debounced push; we're pushing now
   if(!quiet) setSyncStatus("Syncing…","var(--amber)");
   try{
-    state.updated = state.updated || Date.now();
-    const { error } = await sb.from("app_data").upsert({ id:CLOUD_ROW_ID, data:state, updated_at:new Date().toISOString() });
+    // One clock: stamp now, and write the SAME value to both the data and the column
+    // so pulls compare like-for-like and never see a mismatched timestamp.
+    const stamp = Date.now();
+    state.updated = stamp;
+    const { error } = await sb.from("app_data").upsert({ id:CLOUD_ROW_ID, data:state, updated_at:new Date(stamp).toISOString() });
     if(error) throw error;
-    lastSyncedUpdated = state.updated; // this device is now clean/in-sync
+    lastSyncedUpdated = stamp; // this device is now clean/in-sync
+    try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){}
+    markSynced("up");
     if(!quiet) setSyncStatus("Synced just now","var(--green)"); else refreshSyncUI();
   }catch(e){ console.log("push failed",e); setSyncStatus("Sync failed (will retry)","var(--red)"); }
   syncing=false;
@@ -770,21 +822,16 @@ async function pullFromCloud(opts){
     if(cloudHasData && localItemCount===0 && cloud.items && cloud.items.length){ applyCloud(cloud); return; }
 
     if(cloudHasData && cloudUpdated > localUpdated){
-      if(!localDirty){ applyCloud(cloud); return; }
-      const when = new Date(cloudUpdated).toLocaleString();
-      if(opts.background){
-        if(confirm("Heads up: the synced copy (saved "+when+") changed on another device, and you've also made changes here.\n\nOK = load the synced copy (discards this device's unsaved changes).\nCancel = keep this device's copy and push it up.")){
-          applyCloud(cloud);
-        } else { await pushToCloud(false); }
-      } else {
-        if(confirm("The synced copy (last saved "+when+") is newer than what's on this device.\n\nOK = load the synced copy.\nCancel = keep this device's copy.")){
-          applyCloud(cloud);
-        } else { await pushToCloud(false); }
-      }
+      // Cloud's timestamp is newer than ours -> newest wins automatically, load the cloud.
+      // (This also covers the true-conflict case: if both changed since last sync, whichever
+      //  was saved most recently wins, no prompt.)
+      applyCloud(cloud);
+      if(opts.manual) setSyncStatus("Synced (loaded newer copy)","var(--green)");
+      return;
     } else {
-      // local is newer or equal. Only push up if local actually has data,
-      // AND we're not about to clobber a populated cloud with a smaller/empty local.
-      if(localHasData) await pushToCloud(true);
+      // We're newer or equal -> our copy wins; push up if we have unsynced data.
+      if(localHasData && localHasUnsynced()) await pushToCloud(true);
+      if(opts.manual) setSyncStatus("Up to date","var(--green)");
     }
   }catch(e){ console.log("pull failed",e); if(!opts.background) setSyncStatus("Sync check failed","var(--red)"); }
 }
@@ -792,8 +839,9 @@ function applyCloud(cloud){
   state=cloud;
   state.bal=state.bal||{}; state.buffer=state.buffer||{}; state.paid=state.paid||{}; state.items=state.items||[]; state.accounts=state.accounts||[];
   if(!state.od) state.od={}; state.accounts.forEach(a=>{ if(state.bal[a]===undefined)state.bal[a]=0; if(state.buffer[a]===undefined)state.buffer[a]=0; if(!state.paid[a])state.paid[a]=[]; });
-  try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){}
+  try{ const j=JSON.stringify(state); localStorage.setItem(KEY, j); if(state.accounts&&state.accounts.length){ localStorage.setItem(KEY+"_rescue", j); } }catch(e){}
   lastSyncedUpdated = state.updated || Date.now(); // loaded cloud = this device is clean/in-sync
+  markSynced("down");
   let saved=null; try{saved=localStorage.getItem("cf_curAcct");}catch(e){}
   cur = (state.accounts.includes(cur)? cur : (saved && state.accounts.includes(saved)? saved : state.accounts[0])) || null;
   if(state.accounts.length){ show("trackerScreen"); buildTabs(); syncBalInput(); render(); }
@@ -821,33 +869,34 @@ async function firstSyncAfterSignIn(){
     const cloudHasData = !!(cloud && cloud.accounts && cloud.accounts.length);
     const localHasData = !!(state && state.accounts && state.accounts.length);
     const localItemCount = (state && state.items) ? state.items.length : 0;
+    const cloudUpdated = cloud ? (cloud.updated || Date.parse(data.updated_at) || 0) : 0;
+    const localUpdated = (state && state.updated) || 0;
 
     if(cloudHasData && (!localHasData || localItemCount===0)){
-      // fresh/empty device, cloud has real data -> load it, no question (this is the safe default)
+      // fresh/empty device, cloud has real data -> ALWAYS load it. Never upload blank.
       applyCloud(cloud);
       document.getElementById("status").textContent="Loaded your synced data from the cloud.";
-      return;
+      cloudChecked=true; return;
     }
     if(cloudHasData && localHasData){
-      // both sides have data -> ask which to keep, never silently overwrite
-      const when = data.updated_at ? new Date(Date.parse(data.updated_at)).toLocaleString() : "previously";
-      if(confirm("This device already has data, and there's also a synced copy in the cloud (saved "+when+").\n\nOK = load the cloud copy (replaces what's on this device).\nCancel = keep this device's data and upload it (replaces the cloud copy).")){
+      // both sides have data -> NEWEST WINS automatically (no prompt).
+      if(cloudUpdated >= localUpdated){
         applyCloud(cloud);
-        document.getElementById("status").textContent="Loaded the cloud copy.";
+        document.getElementById("status").textContent="Loaded the newer synced copy.";
       } else {
-        await pushToCloud(false);
-        document.getElementById("status").textContent="Uploaded this device's data to the cloud.";
+        await pushToCloud(false, true);
+        document.getElementById("status").textContent="This device was newer, uploaded it.";
       }
-      return;
+      cloudChecked=true; return;
     }
     if(!cloudHasData && localHasData){
       // cloud empty, we have data -> safe to seed the cloud
-      await pushToCloud(false);
+      await pushToCloud(false, true);
       document.getElementById("status").textContent="Uploaded this device's data to the cloud.";
-      return;
+      cloudChecked=true; return;
     }
     // neither has data -> nothing to do
-    refreshSyncUI();
+    cloudChecked=true; refreshSyncUI();
   }catch(e){ console.log("first sync failed",e); setSyncStatus("Sync check failed","var(--red)"); }
 }
 async function doSignOut(){
@@ -860,7 +909,7 @@ async function initAuth(){
   if(!sb){ refreshSyncUI(); return; }
   try{
     const { data } = await sb.auth.getSession();
-    if(data && data.session){ currentUser=data.session.user; refreshSyncUI(); await pullFromCloud({}); }
+    if(data && data.session){ currentUser=data.session.user; refreshSyncUI(); await firstSyncAfterSignIn(); }
     else refreshSyncUI();
   }catch(e){ refreshSyncUI(); }
 }
@@ -1297,7 +1346,18 @@ document.getElementById("signInBtn").onclick=()=>{ closeDrawer(); document.getEl
 document.getElementById("siCancel").onclick=()=>document.getElementById("signInModal").classList.remove("open");
 document.getElementById("siGo").onclick=()=>{ const em=document.getElementById("siEmail").value.trim(); const pw=document.getElementById("siPass").value; if(!em||!pw){ document.getElementById("siMsg").textContent="Enter email and password."; return;} doSignIn(em,pw); };
 document.getElementById("siPass").addEventListener("keydown",e=>{ if(e.key==="Enter") document.getElementById("siGo").click(); });
-document.getElementById("syncNowBtn").onclick=async()=>{ closeDrawer(); await pullFromCloud({}); if(currentUser) await pushToCloud(false); };
+document.getElementById("syncNowBtn").onclick=async()=>{
+  closeDrawer();
+  if(!currentUser){ return; }
+  setSyncStatus("Syncing…","var(--amber)");
+  // If we haven't done the first cloud check yet this session, do it now (protects a
+  // new device from ever pushing blank/stale data up before seeing the cloud).
+  if(!cloudChecked){ await firstSyncAfterSignIn(); return; }
+  // Push local changes UP first so this device's latest edits are never lost,
+  // then pull to bring down anything newer from the other device.
+  if(localHasUnsynced()) await pushToCloud(false);
+  await pullFromCloud({manual:true});
+};
 document.getElementById("signOutBtn").onclick=()=>{ closeDrawer(); doSignOut(); };
 
 function refreshHorizonUI(){
@@ -1321,24 +1381,57 @@ document.getElementById("drawerScrim").onclick=closeDrawer;
 
 /* ---------------- PULL ON RETURN-TO-APP (Option A) ---------------- */
 let lastFocusPull=0;
-function focusPull(){
+async function focusPull(){
   if(!currentUser||!sb) return;
   const now=Date.now();
-  if(now-lastFocusPull < 4000) return; // debounce: don't spam if focus fires repeatedly
+  if(now-lastFocusPull < 1500) return; // small debounce so rapid focus events don't spam
   lastFocusPull=now;
+  // if this device has edits not yet pushed, send them up before pulling
+  if(localHasUnsynced()) await pushToCloud(true);
   pullFromCloud({background:true});
 }
 window.addEventListener("focus", focusPull);
 document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="visible") focusPull(); });
+// also push pending edits when leaving/hiding the app, so the other device can pick them up
+window.addEventListener("pagehide", ()=>{ if(localHasUnsynced()) pushToCloud(true); });
+document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden" && localHasUnsynced()) pushToCloud(true); });
 
 /* ---------------- BOOT ---------------- */
 document.getElementById("verNum").textContent=APP_VERSION;
 load();
-if(state && state.accounts && state.accounts.length){ let saved=null; try{saved=localStorage.getItem("cf_curAcct");}catch(e){} cur=(saved && state.accounts.includes(saved))? saved : state.accounts[0]; show("trackerScreen"); buildTabs(); syncBalInput(); render(); }
-else { show("importScreen"); }
+// Detect a likely existing Supabase session synchronously (token is in localStorage) so a
+// signed-in device with empty local data shows "Loading" instead of the blank Import screen
+// while initAuth() pulls from the cloud. This kills the "went blank after an update" flash.
+function hasSupabaseSession(){
+  try{ for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k && k.indexOf("sb-")===0 && k.indexOf("-auth-token")>0){ const v=localStorage.getItem(k); if(v && v.length>20) return true; } } }catch(e){}
+  return false;
+}
+if(state && state.accounts && state.accounts.length){
+  let saved=null; try{saved=localStorage.getItem("cf_curAcct");}catch(e){}
+  cur=(saved && state.accounts.includes(saved))? saved : state.accounts[0];
+  show("trackerScreen"); buildTabs(); syncBalInput(); render();
+} else if(hasSupabaseSession()){
+  // signed in but nothing local yet -> show a gentle loading state; initAuth() will fill it
+  const st=document.getElementById("status"); if(st) st.textContent="Loading your data from the cloud…";
+  const rows=document.getElementById("rows"); if(rows) rows.innerHTML='<p style="color:var(--muted); font-size:14px; padding:20px 0; text-align:center;">Loading your data from the cloud…</p>';
+  show("trackerScreen");
+} else {
+  show("importScreen");
+}
 refreshSyncUI();
 refreshHorizonUI();
 initAuth();
+// Safety: if we showed the "Loading…" state but nothing populated within a few seconds
+// (cloud empty, offline, or pull failed), fall back to the Import screen so we're never stuck.
+if(!(state && state.accounts && state.accounts.length) && hasSupabaseSession()){
+  setTimeout(()=>{
+    if(!(state && state.accounts && state.accounts.length)){
+      const rows=document.getElementById("rows"); if(rows) rows.innerHTML="";
+      show("importScreen");
+      const st=document.getElementById("status"); if(st) st.textContent="";
+    }
+  }, 6000);
+}
 
 if("serviceWorker" in navigator){ window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{})); }
 </script>
